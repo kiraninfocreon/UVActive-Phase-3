@@ -97,12 +97,14 @@ export function SessionDetailsScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  // If we have no local results (e.g. session was created/synced from
-  // another device), fall back to the remote session's per-member results.
+  // Cloud DB is the source of truth for the leaderboard. This phone's
+  // local SQLite is only a fallback while the cloud has no results for
+  // the session yet (e.g. just finished offline, not synced).
   const leaderboard = useMemo(() => {
     let rows = results;
-    if (rows.length === 0 && remote?.members?.length) {
-      rows = remote.members.map((m) => ({
+    const cloudHasResults = !!remote?.members?.some((m) => m.avgHr != null || m.score != null);
+    if (cloudHasResults || rows.length === 0) {
+      rows = (remote?.members ?? []).map((m) => ({
         memberId: m.memberId,
         memberName: m.member?.name ?? 'Member',
         avgHr: m.avgHr ?? null,
@@ -117,6 +119,7 @@ export function SessionDetailsScreen() {
           ? Object.fromEntries(Object.entries(m.zoneMinutes).map(([z, mins]) => [z, Math.round(mins * 60)]))
           : null,
       }));
+      if (rows.length === 0) rows = results;
     }
     return rows.slice().sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
   }, [results, remote]);
@@ -159,6 +162,23 @@ export function SessionDetailsScreen() {
 
   const onResume = () => {
     navigation.navigate('LiveSession', { sessionId });
+  };
+
+  const [recalculating, setRecalculating] = useState(false);
+  const onRecalculate = async () => {
+    setRecalculating(true);
+    try {
+      await sessionsApi.recalculateSession(sessionId);
+      await load();
+      Alert.alert('Recalculated', 'Results were recomputed from the cloud database.');
+    } catch (e) {
+      Alert.alert(
+        'Could not recalculate',
+        e instanceof ApiError ? e.message : 'Check your connection and try again — recalculating needs to reach the cloud.',
+      );
+    } finally {
+      setRecalculating(false);
+    }
   };
 
   const onCancel = () => {
@@ -270,7 +290,20 @@ export function SessionDetailsScreen() {
         {/* Leaderboard (completed) */}
         {isCompleted && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Leaderboard</Text>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={[styles.sectionTitle, { marginBottom: 0 }]}>Leaderboard</Text>
+              <TouchableOpacity
+                style={[styles.recalcBtn, recalculating && { opacity: 0.5 }]}
+                onPress={onRecalculate}
+                disabled={recalculating}
+              >
+                {recalculating ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : (
+                  <Text style={styles.recalcBtnText}>Recalculate</Text>
+                )}
+              </TouchableOpacity>
+            </View>
             {leaderboard.length === 0 ? (
               <Text style={styles.emptyText}>No results were recorded for this session.</Text>
             ) : (
@@ -391,6 +424,12 @@ const styles = StyleSheet.create({
   statValue: { fontFamily: fonts.heading, fontSize: 16, color: colors.foreground, maxWidth: '100%' },
   statLabel: { fontFamily: fonts.body, fontSize: 10, color: colors.mutedForeground, textTransform: 'uppercase', letterSpacing: 0.5 },
   section: { marginTop: spacing.xl },
+  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
+  recalcBtn: {
+    borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm, paddingVertical: 4, minWidth: 90, alignItems: 'center',
+  },
+  recalcBtnText: { fontFamily: fonts.bodySemiBold, fontSize: 12, color: colors.primary },
   sectionTitle: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.foreground, marginBottom: spacing.sm },
   emptyText: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground },
   rosterGrid: { gap: spacing.sm },

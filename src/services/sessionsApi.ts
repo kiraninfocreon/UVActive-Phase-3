@@ -122,6 +122,13 @@ export const sessionsApi = {
   end: (sessionId: string, results: EndSessionResult[]) => api.post(`/trainer/sessions/${sessionId}/end`, { results }),
 
   cancel: (sessionId: string, reason: string) => api.post(`/trainer/sessions/${sessionId}/cancel`, { reason }),
+
+  /**
+   * Server-side recompute of Sweat/Recovery/EPOC/Max %HR/rank from the
+   * cloud DB's stored readings — works for ANY past session, on any
+   * device, independent of this phone's local SQLite.
+   */
+  recalculateSession: (sessionId: string) => api.post(`/trainer/sessions/${sessionId}/recalculate`),
 };
 
 export interface EndSessionResult {

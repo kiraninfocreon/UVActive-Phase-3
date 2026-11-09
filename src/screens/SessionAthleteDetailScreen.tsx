@@ -94,18 +94,18 @@ export function SessionAthleteDetailScreen() {
     const lm = (membersLocal as unknown as LocalMemberRow[]).find((m) => m.member_id === memberId) ?? null;
     setLocalMember(lm);
 
-    // Ticks: prefer local SQLite (this device ran the session — richest,
-    // zero network), then fall back to the cloud API's zone-tagged ticks
-    // (session synced from elsewhere / a different trainer's device).
-    const localTicks = await getTicksForMember(sessionId, memberId).catch(() => []);
-    if (localTicks.length > 0) {
-      setTicks(localTicks.map((t) => ({ ts: t.ts, bpm: t.bpm })));
-      setTicksSource('local');
+    // Ticks: cloud DB first (zone-tagged, same on every device), then
+    // fall back to this phone's local SQLite only if the cloud has none
+    // (e.g. session just finished offline and hasn't synced yet).
+    const remoteTicks = await sessionsApi.athleteTicks(sessionId, memberId).catch(() => null);
+    if (remoteTicks?.ticks?.length) {
+      setTicks(remoteTicks.ticks);
+      setTicksSource('remote');
     } else {
-      const remoteTicks = await sessionsApi.athleteTicks(sessionId, memberId).catch(() => null);
-      if (remoteTicks?.ticks?.length) {
-        setTicks(remoteTicks.ticks);
-        setTicksSource('remote');
+      const localTicks = await getTicksForMember(sessionId, memberId).catch(() => []);
+      if (localTicks.length > 0) {
+        setTicks(localTicks.map((t) => ({ ts: t.ts, bpm: t.bpm })));
+        setTicksSource('local');
       } else {
         setTicks([]);
         setTicksSource('none');

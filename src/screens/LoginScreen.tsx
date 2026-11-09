@@ -1,127 +1,87 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, Image, ActivityIndicator } from 'react-native';
-import { Eye, EyeOff } from 'lucide-react-native';
-import { useAuth } from '../hooks/useAuth';
+import { View, Text, TextInput, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Image } from 'react-native';
 import { colors, fonts, radius, spacing } from '../theme/tokens';
-import { ApiError } from '../services/api';
 import { Screen } from '../components/Screen';
-
-const logo = require('../../assets/uvactive-logo.jpg');
+import { Glass } from '../components/uv/Glass';
+import { PillButton, UnderlineTabs } from '../components/uv/Ui';
+import { useAuth } from '../hooks/useAuth';
+import { ApiError } from '../services/api';
 
 export function LoginScreen() {
-  const { login } = useAuth();
-  const [memberCode, setMemberCode] = useState('');
+  const { loginPin, loginEmail } = useAuth();
+  const [mode, setMode] = useState<'pin' | 'email'>('pin');
+  const [code, setCode] = useState('');
   const [pin, setPin] = useState('');
-  const [showPin, setShowPin] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const ready = mode === 'pin' ? code.trim().length > 0 && pin.length === 6 : email.includes('@') && password.length > 0;
 
   const submit = async () => {
-    setError('');
-    setLoading(true);
+    setBusy(true); setError(null);
     try {
-      await login(memberCode.trim(), pin);
-      // On success, member state updates and RootNavigator swaps to
-      // Main automatically. Session is persisted to SecureStore by
-      // login()/tokenStore, so next app open skips this screen.
+      if (mode === 'pin') await loginPin(code, pin); else await loginEmail(email, password);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Something went wrong. Try again.');
-    } finally {
-      setLoading(false);
-    }
+      setError(e instanceof ApiError ? e.message : 'Could not sign in. Try again.');
+    } finally { setBusy(false); }
   };
 
   return (
-    <Screen edges={['top', 'bottom']} style={styles.root}>
-    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <View style={styles.content}>
-        <View style={styles.brand}>
-          <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.title}>UV Active</Text>
-          <Text style={styles.subtitle}>Sign in with the Member ID + PIN your gym gave you</Text>
-        </View>
+    <Screen>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.wrap}>
+        <Image source={require('../../assets/uvactive-logo.jpg')} style={styles.logo} resizeMode="contain" />
+        <Text style={styles.title}>Welcome back</Text>
+        <Text style={styles.sub}>Sign in to see your workouts and book your next session.</Text>
 
-        <Text style={styles.label}>Member ID</Text>
-        <TextInput
-          style={styles.input}
-          value={memberCode}
-          onChangeText={setMemberCode}
-          autoCapitalize="characters"
-          autoCorrect={false}
-          placeholder="UVA-XXXXXX"
-          placeholderTextColor={colors.mutedForeground}
-          editable={!loading}
-        />
-
-        <Text style={styles.label}>PIN</Text>
-        <View style={styles.pinRow}>
-          <TextInput
-            style={[styles.input, styles.pinInput]}
-            value={pin}
-            onChangeText={(t) => setPin(t.replace(/[^0-9]/g, '').slice(0, 6))}
-            secureTextEntry={!showPin}
-            keyboardType="number-pad"
-            placeholder="••••••"
-            placeholderTextColor={colors.mutedForeground}
-            editable={!loading}
-            onSubmitEditing={submit}
-            returnKeyType="go"
-            maxLength={6}
-          />
-          <TouchableOpacity style={styles.eyeButton} onPress={() => setShowPin((v) => !v)} hitSlop={10}>
-            {showPin ? <EyeOff size={18} color={colors.mutedForeground} /> : <Eye size={18} color={colors.mutedForeground} />}
-          </TouchableOpacity>
-        </View>
-
-        {!!error && <Text style={styles.error}>{error}</Text>}
-
-        <TouchableOpacity
-          style={[styles.submitButton, loading && styles.submitButtonDisabled]}
-          onPress={submit}
-          disabled={loading || !memberCode || pin.length < 4}
-        >
-          {loading ? <ActivityIndicator color={colors.primaryForeground} /> : <Text style={styles.submitText}>Sign In</Text>}
-        </TouchableOpacity>
-
-        <Text style={styles.footNote}>Forgot your PIN? Ask a staff member at your gym to reset it.</Text>
-      </View>
-    </KeyboardAvoidingView>
+        <Glass style={{ padding: spacing.xl, marginTop: spacing.xl }}>
+          <UnderlineTabs value={mode} onChange={setMode} tabs={[{ key: 'pin', label: 'Member ID' }, { key: 'email', label: 'Email' }]} />
+          {mode === 'pin' ? (
+            <>
+              <Field label="Member ID" value={code} onChangeText={setCode} autoCapitalize="characters" />
+              <Field label="6-digit PIN" value={pin} onChangeText={(t) => setPin(t.replace(/\D/g, '').slice(0, 6))} secure keyboardType="number-pad" />
+            </>
+          ) : (
+            <>
+              <Field label="Email" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+              <Field label="Password" value={password} onChangeText={setPassword} secure />
+            </>
+          )}
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+          <PillButton label={busy ? 'Signing in…' : 'Sign in'} disabled={!ready || busy} onPress={submit} icon={busy ? <ActivityIndicator size="small" color="#fff" /> : undefined} style={{ marginTop: spacing.md }} />
+        </Glass>
+      </KeyboardAvoidingView>
     </Screen>
   );
 }
 
+export function Field({ label, value, onChangeText, secure, keyboardType, autoCapitalize }: {
+  label: string; value: string; onChangeText: (t: string) => void; secure?: boolean; keyboardType?: any; autoCapitalize?: any;
+}) {
+  return (
+    <View style={{ marginBottom: spacing.md }}>
+      <Text style={styles.label}>{label}</Text>
+      <TextInput
+        style={styles.input}
+        value={value}
+        onChangeText={onChangeText}
+        secureTextEntry={secure}
+        keyboardType={keyboardType}
+        autoCapitalize={autoCapitalize ?? 'none'}
+        autoCorrect={false}
+        placeholderTextColor={colors.mutedForeground}
+      />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.background },
-  flex: { flex: 1, justifyContent: 'center' },
-  content: { paddingHorizontal: spacing.xl },
-  brand: { alignItems: 'center', marginBottom: spacing.xxl },
-  logo: { width: 88, height: 88, borderRadius: radius.lg, marginBottom: spacing.md },
-  title: { fontFamily: fonts.heading, fontSize: 32, color: colors.foreground },
-  subtitle: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground, marginTop: spacing.xs, textAlign: 'center' },
-  label: { fontFamily: fonts.bodyMedium, fontSize: 13, color: colors.mutedForeground, marginBottom: spacing.xs, marginTop: spacing.md },
-  input: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    fontFamily: fonts.body,
-    fontSize: 15,
-    color: colors.foreground,
-  },
-  pinRow: { position: 'relative', justifyContent: 'center' },
-  pinInput: { paddingRight: 44, letterSpacing: 4 },
-  eyeButton: { position: 'absolute', right: spacing.md },
-  error: { color: colors.destructive, fontFamily: fonts.body, fontSize: 13, marginTop: spacing.md },
-  submitButton: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    marginTop: spacing.xl,
-  },
-  submitButtonDisabled: { opacity: 0.6 },
-  submitText: { fontFamily: fonts.bodySemiBold, fontSize: 16, color: colors.primaryForeground },
-  footNote: { color: colors.mutedForeground, textAlign: 'center', marginTop: spacing.lg, fontFamily: fonts.body, fontSize: 12 },
+  wrap: { flex: 1, justifyContent: 'center', paddingHorizontal: spacing.xl },
+  logo: { width: 120, height: 56, alignSelf: 'flex-start', marginBottom: spacing.xl },
+  title: { fontFamily: fonts.heading, fontSize: 32, letterSpacing: -0.5, color: colors.foreground },
+  sub: { fontFamily: fonts.body, fontSize: 14, color: colors.mutedForeground, marginTop: 8, lineHeight: 20 },
+  label: { fontFamily: fonts.bodySemiBold, fontSize: 10, letterSpacing: 1.6, textTransform: 'uppercase', color: colors.mutedForeground, marginBottom: 6 },
+  input: { backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassBorder, borderRadius: radius.lg, paddingHorizontal: spacing.lg, paddingVertical: 13, fontFamily: fonts.metric, fontSize: 15, color: colors.foreground },
+  error: { fontFamily: fonts.body, fontSize: 13, color: colors.destructive, marginTop: 4 },
 });

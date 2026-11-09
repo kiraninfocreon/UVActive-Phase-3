@@ -13,7 +13,7 @@
  * step becomes a short, rotated 2px-tall View, "connecting the dots".
  */
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, ScrollView } from 'react-native';
 
 export interface GraphPoint { value: number; zone?: number; }
 
@@ -25,6 +25,16 @@ interface Props {
   maxValue?: number;   // fixed ceiling (e.g. 200 bpm) — omit to auto-scale
   emptyLabel?: string;
   showStats?: boolean; // min/avg/max readout strip above the plot (default true)
+  /**
+   * "Slider" mode — matches the Admin Panel / Branch Portal's
+   * horizontally-scrollable full-session graph (one member's entire
+   * second-by-second curve, not squeezed to fit the screen width).
+   * When on, the plot gets a fixed content width (points.length *
+   * pxPerPoint, floored at the container) and scrolls horizontally
+   * instead of auto-fitting.
+   */
+  scrollable?: boolean;
+  pxPerPoint?: number; // width per sample when scrollable (default 4px, like the web panels)
 }
 
 const ZONE_COLORS: Record<number, string> = {
@@ -39,7 +49,7 @@ const GRID_LINES = 4; // horizontal gridlines, evenly spaced top→bottom
 
 export function BpmLineGraph({
   points, height = 150, lineColor = '#EF4444', minValue, maxValue,
-  emptyLabel = 'No data yet', showStats = true,
+  emptyLabel = 'No data yet', showStats = true, scrollable = false, pxPerPoint = 4,
 }: Props) {
   if (!points || points.length < 2) {
     return (
@@ -51,25 +61,44 @@ export function BpmLineGraph({
   }
 
   const values = points.map(p => p.value);
-  // Safe min/max — spread operator can stack-overflow with thousands of points.
-  let dataLo = values[0];
-  let dataHi = values[0];
-  for (let i = 1; i < values.length; i++) {
-    if (values[i] < dataLo) dataLo = values[i];
-    if (values[i] > dataHi) dataHi = values[i];
-  }
-  const lo = minValue ?? dataLo;
-  const hi = maxValue ?? dataHi;
+  const lo = minValue ?? Math.min(...values);
+  const hi = maxValue ?? Math.max(...values);
   const range = Math.max(1, hi - lo);
   const avg = Math.round(values.reduce((a, b) => a + b, 0) / values.length);
-  const min = Math.round(dataLo);
-  const max = Math.round(dataHi);
+  const min = Math.round(Math.min(...values));
+  const max = Math.round(Math.max(...values));
 
   // Which zone dominated this stretch of data — drives the "current zone"
   // chip so the reader gets an at-a-glance read, not just a squiggly line.
   const zoneCounts: Record<number, number> = {};
   points.forEach(p => { if (p.zone != null) zoneCounts[p.zone] = (zoneCounts[p.zone] || 0) + 1; });
   const dominantZone = Object.entries(zoneCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+  const contentWidth = scrollable ? Math.max(points.length * pxPerPoint, 320) : undefined;
+
+  const plot = (
+    <View style={[gs.wrap, { height }, contentWidth ? { width: contentWidth } : null]}>
+      {/* Gridlines + axis labels */}
+      {Array.from({ length: GRID_LINES + 1 }).map((_, i) => {
+        const frac = i / GRID_LINES;
+        const val = Math.round(hi - frac * range);
+        return (
+          <View key={i} style={[gs.gridLine, { top: 6 + frac * (height - 12) }]} pointerEvents="none">
+            <Text style={gs.gridLabel}>{val}</Text>
+            <View style={gs.gridRule} />
+          </View>
+        );
+      })}
+      {/* Dashed average reference line */}
+      <View
+        style={[gs.avgLine, { top: 6 + (1 - (avg - lo) / range) * (height - 12) }]}
+        pointerEvents="none"
+      />
+      <View style={gs.plotArea}>
+        <GraphLines points={points} lo={lo} range={range} height={height} lineColor={lineColor} />
+      </View>
+    </View>
+  );
 
   return (
     <View>
@@ -88,27 +117,16 @@ export function BpmLineGraph({
           )}
         </View>
       )}
-      <View style={[gs.wrap, { height }]}>
-        {/* Gridlines + axis labels */}
-        {Array.from({ length: GRID_LINES + 1 }).map((_, i) => {
-          const frac = i / GRID_LINES;
-          const val = Math.round(hi - frac * range);
-          return (
-            <View key={i} style={[gs.gridLine, { top: 6 + frac * (height - 12) }]} pointerEvents="none">
-              <Text style={gs.gridLabel}>{val}</Text>
-              <View style={gs.gridRule} />
-            </View>
-          );
-        })}
-        {/* Dashed average reference line */}
-        <View
-          style={[gs.avgLine, { top: 6 + (1 - (avg - lo) / range) * (height - 12) }]}
-          pointerEvents="none"
-        />
-        <View style={gs.plotArea}>
-          <GraphLines points={points} lo={lo} range={range} height={height} lineColor={lineColor} />
-        </View>
-      </View>
+      {scrollable ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator bounces={false} contentContainerStyle={gs.scrollContent}>
+          {plot}
+        </ScrollView>
+      ) : (
+        plot
+      )}
+      {scrollable && points.length > 1 && (
+        <Text style={gs.scrollHint}>← scroll for the full session →</Text>
+      )}
     </View>
   );
 }
@@ -203,4 +221,6 @@ const gs = StyleSheet.create({
   gridRule:     { flex: 1, height: 1, backgroundColor: '#1a1a1a' },
   avgLine:      { position: 'absolute', left: 30, right: 0, height: 1, borderTopWidth: 1, borderStyle: 'dashed', borderColor: '#F59E0B66' },
   emptyText:    { color: '#444', fontSize: 12, textAlign: 'center', paddingHorizontal: 16 },
+  scrollContent: { flexGrow: 1 },
+  scrollHint:   { color: '#444', fontSize: 9, textAlign: 'center', marginTop: 4, fontWeight: '600', letterSpacing: 0.3 },
 });

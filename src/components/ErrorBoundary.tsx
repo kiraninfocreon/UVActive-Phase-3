@@ -5,6 +5,15 @@ import { colors, fonts, radius, spacing } from '../theme/tokens';
 
 interface Props {
   children: React.ReactNode;
+  /** Shown in the fallback title, e.g. "Sensors hit an unexpected error" instead of the generic "Something went wrong". Used when this boundary wraps a single screen rather than the whole app. */
+  label?: string;
+  /**
+   * Called (in addition to the internal error being cleared) when the
+   * user taps "Try Again". A per-screen boundary passes a data-reload
+   * function here so retrying doesn't just re-render stale state that
+   * immediately throws the same error again.
+   */
+  onRetry?: () => void;
 }
 interface State {
   error: Error | null;
@@ -39,27 +48,29 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   private reset = () => {
+    this.props.onRetry?.();
     this.setState({ error: null });
   };
 
   render() {
     if (this.state.error) {
-      return <ErrorFallback error={this.state.error} onRetry={this.reset} />;
+      return <ErrorFallback error={this.state.error} onRetry={this.reset} label={this.props.label} />;
     }
     return this.props.children;
   }
 }
 
-function ErrorFallback({ error, onRetry }: { error: Error; onRetry: () => void }) {
+function ErrorFallback({ error, onRetry, label }: { error: Error; onRetry: () => void; label?: string }) {
   return (
     <View style={styles.root}>
       <View style={styles.iconWrap}>
         <AlertTriangle size={32} color={colors.destructive} />
       </View>
-      <Text style={styles.title}>Something went wrong</Text>
+      <Text style={styles.title}>{label ? `${label} hit an error` : 'Something went wrong'}</Text>
       <Text style={styles.note}>
-        This screen hit an unexpected error. If a session is currently running, it's still recording locally — this
-        doesn't stop that.
+        {label
+          ? `The ${label} screen ran into an unexpected error. Tap Try Again to reload just this screen — the rest of the app, and any session currently running, is unaffected.`
+          : "This screen hit an unexpected error. If a session is currently running, it's still recording locally — this doesn't stop that."}
       </Text>
 
       <TouchableOpacity style={styles.button} onPress={onRetry}>

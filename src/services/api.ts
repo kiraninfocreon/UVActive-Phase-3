@@ -1,27 +1,24 @@
 /**
- * UV Active Member App — cloud API client. Same shape as the Trainer
- * App's services/api.ts (plain fetch + timeout + one-shot 401 refresh),
- * just pointed at the member auth realm instead of staff.
+ * UV Active Member App — cloud API client (member realm).
+ * Same transport as the trainer app: fetch + timeout + one silent
+ * refresh on 401, tokens in SecureStore. The response envelope is
+ * `{ data }`; errors carry `{ error: { message, code } }`.
  */
 import * as SecureStore from 'expo-secure-store';
 import { API_BASE_URL } from '../config';
 
-const ACCESS_TOKEN_KEY = 'uva_member_access_token';
-const REFRESH_TOKEN_KEY = 'uva_member_refresh_token';
-const MEMBER_PROFILE_KEY = 'uva_member_profile';
+const ACCESS = 'uva_member_access';
+const REFRESH = 'uva_member_refresh';
+const PROFILE = 'uva_member_profile';
 
-// Minimal profile returned directly by login — just enough to route
-// into the app. The Settings/Home/Workout screens all pull the fuller
-// bio-inclusive profile from member/me (see membersApi.me()) since
-// that's also what stays fresh after a Settings edit.
 export interface MemberProfile {
   id: string;
   memberCode: string;
   name: string;
-  phone: string | null;
-  email: string | null;
-  photoUrl: string | null;
-  currentGymId: string | null;
+  phone?: string | null;
+  email?: string | null;
+  photoUrl?: string | null;
+  currentGymId?: string | null;
 }
 
 export class ApiError extends Error {
@@ -34,182 +31,112 @@ export class ApiError extends Error {
   }
 }
 
-type UnauthorizedHandler = () => void;
-let _onUnauthorized: UnauthorizedHandler | null = null;
-export function setUnauthorizedHandler(fn: UnauthorizedHandler) {
-  _onUnauthorized = fn;
-}
+let onUnauthorized: (() => void) | null = null;
+export const setUnauthorizedHandler = (fn: () => void) => { onUnauthorized = fn; };
 
 export const tokenStore = {
-  async getAccess(): Promise<string | null> {
-    return SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
-  },
-  async getRefresh(): Promise<string | null> {
-    return SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
-  },
+  getAccess: () => SecureStore.getItemAsync(ACCESS),
+  getRefresh: () => SecureStore.getItemAsync(REFRESH),
   async getProfile(): Promise<MemberProfile | null> {
-    const raw = await SecureStore.getItemAsync(MEMBER_PROFILE_KEY);
+    const raw = await SecureStore.getItemAsync(PROFILE);
     return raw ? JSON.parse(raw) : null;
   },
-  async set(accessToken: string, refreshToken: string, profile: MemberProfile): Promise<void> {
+  async set(access: string, refresh: string, profile: MemberProfile) {
     await Promise.all([
-      SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken),
-      SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshToken),
-      SecureStore.setItemAsync(MEMBER_PROFILE_KEY, JSON.stringify(profile)),
+      SecureStore.setItemAsync(ACCESS, access),
+      SecureStore.setItemAsync(REFRESH, refresh),
+      SecureStore.setItemAsync(PROFILE, JSON.stringify(profile)),
     ]);
   },
-  async setAccess(accessToken: string): Promise<void> {
-    await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken);
-  },
-  async setProfile(profile: MemberProfile): Promise<void> {
-    await SecureStore.setItemAsync(MEMBER_PROFILE_KEY, JSON.stringify(profile));
-  },
-  async clear(): Promise<void> {
-    await Promise.all([
-      SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY),
-      SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY),
-      SecureStore.deleteItemAsync(MEMBER_PROFILE_KEY),
-    ]);
+  setAccess: (access: string) => SecureStore.setItemAsync(ACCESS, access),
+  async setProfile(profile: MemberProfile) { await SecureStore.setItemAsync(PROFILE, JSON.stringify(profile)); },
+  async clear() {
+    await Promise.all([SecureStore.deleteItemAsync(ACCESS), SecureStore.deleteItemAsync(REFRESH), SecureStore.deleteItemAsync(PROFILE)]);
   },
 };
 
-// Same generous timeout as the Trainer App — covers a cold-start free-tier
-// deploy waking up, not just a normal request.
-const REQUEST_TIMEOUT_MS = 45_000;
+const TIMEOUT_MS = 45_000; // survives a cold-started free-tier host
 
-interface RequestOptions {
+interface Opts {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
-  query?: Record<string, string | number | boolean | undefined>;
-  auth?: boolean; // default true
+  auth?: boolean;
   isRetry?: boolean;
 }
 
-function buildUrl(path: string, query?: RequestOptions['query']): string {
-  const url = new URL(`${API_BASE_URL}${path}`);
-  if (query) {
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined) url.searchParams.set(k, String(v));
-    }
-  }
-  return url.toString();
-}
-
-async function request<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, query, auth = true, isRetry = false } = options;
+async function request<T>(path: string, o: Opts = {}): Promise<T> {
+  const { method = 'GET', body, auth = true, isRetry = false } = o;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
   if (auth) {
-    const token = await tokenStore.getAccess();
-    if (token) headers.Authorization = `Bearer ${token}`;
+    const t = await tokenStore.getAccess();
+    if (t) headers.Authorization = `Bearer ${t}`;
   }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(buildUrl(path, query), {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-    });
+    res = await fetch(`${API_BASE_URL}${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: ctl.signal });
   } catch (e: any) {
     clearTimeout(timer);
-    if (e?.name === 'AbortError') {
-      throw new ApiError('Request timed out — check your connection.', 0, 'TIMEOUT');
-    }
+    if (e?.name === 'AbortError') throw new ApiError('Request timed out — check your connection.', 0, 'TIMEOUT');
     throw new ApiError('Network error — check your connection.', 0, 'NETWORK');
   }
   clearTimeout(timer);
 
   if (res.status === 401 && auth && !isRetry) {
-    const refreshed = await tryRefresh();
-    if (refreshed) {
-      return request<T>(path, { ...options, isRetry: true });
-    }
+    if (await tryRefresh()) return request<T>(path, { ...o, isRetry: true });
     await tokenStore.clear();
-    _onUnauthorized?.();
+    onUnauthorized?.();
     throw new ApiError('Session expired — please sign in again.', 401, 'UNAUTHORIZED');
   }
-
-  const envelope = await res.json().catch(() => null);
-  if (!res.ok) {
-    const message = envelope?.error?.message || envelope?.message || `Server error (${res.status})`;
-    throw new ApiError(message, res.status, envelope?.error?.code);
-  }
-  return (envelope?.data ?? envelope) as T;
+  const env = await res.json().catch(() => null);
+  if (!res.ok) throw new ApiError(env?.error?.message || env?.message || `Server error (${res.status})`, res.status, env?.error?.code);
+  return (env?.data ?? env) as T;
 }
 
-let _refreshInFlight: Promise<boolean> | null = null;
-async function tryRefresh(): Promise<boolean> {
-  if (_refreshInFlight) return _refreshInFlight;
-  _refreshInFlight = (async () => {
+let refreshing: Promise<boolean> | null = null;
+function tryRefresh(): Promise<boolean> {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
     const refreshToken = await tokenStore.getRefresh();
     if (!refreshToken) return false;
     try {
-      const res = await fetch(buildUrl('/auth/refresh'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken, realm: 'member' }),
+      const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refreshToken, realm: 'member' }),
       });
       if (!res.ok) return false;
-      const envelope = await res.json();
-      const accessToken = envelope?.data?.accessToken ?? envelope?.accessToken;
-      if (!accessToken) return false;
-      await tokenStore.setAccess(accessToken);
+      const env = await res.json();
+      const access = env?.data?.accessToken ?? env?.accessToken;
+      if (!access) return false;
+      await tokenStore.setAccess(access);
       return true;
-    } catch {
-      return false;
-    } finally {
-      _refreshInFlight = null;
-    }
+    } catch { return false; } finally { refreshing = null; }
   })();
-  return _refreshInFlight;
+  return refreshing;
 }
 
 export const api = {
-  get: <T = unknown>(path: string, query?: RequestOptions['query']) => request<T>(path, { method: 'GET', query }),
-  post: <T = unknown>(path: string, body?: unknown, opts?: Partial<RequestOptions>) => request<T>(path, { method: 'POST', body, ...opts }),
-  patch: <T = unknown>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
-  delete: <T = unknown>(path: string) => request<T>(path, { method: 'DELETE' }),
+  get: <T>(p: string) => request<T>(p),
+  post: <T>(p: string, body?: unknown, opts?: Partial<Opts>) => request<T>(p, { method: 'POST', body, ...opts }),
+  patch: <T>(p: string, body?: unknown) => request<T>(p, { method: 'PATCH', body }),
+  delete: <T>(p: string) => request<T>(p, { method: 'DELETE' }),
 };
 
-// ── Auth ──────────────────────────────────────────────────────────────
+interface LoginResult { accessToken: string; refreshToken: string; member: MemberProfile }
 
-export interface MemberLoginResult {
-  accessToken?: string;
-  refreshToken?: string;
-  member?: MemberProfile;
+export async function loginWithPin(memberCode: string, pin: string): Promise<MemberProfile> {
+  const r = await request<LoginResult>('/auth/member/login', { method: 'POST', body: { memberCode: memberCode.trim(), pin }, auth: false });
+  await tokenStore.set(r.accessToken, r.refreshToken, r.member);
+  return r.member;
 }
 
-// memberCode + PIN — the sole login path a front-desk-registered member
-// has from day one (email+password is an alternative first factor for
-// members who've since set one, not covered here).
-export async function memberLogin(memberCode: string, pin: string): Promise<MemberLoginResult> {
-  const data = await request<MemberLoginResult>('/auth/member/login', {
-    method: 'POST',
-    body: { memberCode: memberCode.trim().toUpperCase(), pin },
-    auth: false,
-  });
-  if (data.accessToken && data.refreshToken && data.member) {
-    await tokenStore.set(data.accessToken, data.refreshToken, data.member);
-  }
-  return data;
+export async function loginWithEmail(email: string, password: string): Promise<MemberProfile> {
+  const r = await request<LoginResult>('/auth/member/login-email', { method: 'POST', body: { email: email.trim(), password }, auth: false });
+  await tokenStore.set(r.accessToken, r.refreshToken, r.member);
+  return r.member;
 }
 
-export async function memberLogout(): Promise<void> {
+export async function logout() {
   const refreshToken = await tokenStore.getRefresh();
-  try {
-    if (refreshToken) await api.post('/auth/logout', { refreshToken, realm: 'member' });
-  } catch {
-    // best-effort server-side; local clear below is what actually matters
-  } finally {
-    await tokenStore.clear();
-  }
-}
-
-export function changePin(currentPin: string, newPin: string) {
-  return api.post('/member/change-pin', { currentPin, newPin });
+  try { if (refreshToken) await api.post('/auth/logout', { refreshToken, realm: 'member' }); } catch { /* best-effort */ } finally { await tokenStore.clear(); }
 }

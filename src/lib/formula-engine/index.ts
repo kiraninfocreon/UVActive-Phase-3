@@ -8,3 +8,4 @@ export * from "./epoc";
 export * from "./fitnessTrajectory";
 export * from "./alerts";
 export * from "./session";
+export * from "./hrGuard";

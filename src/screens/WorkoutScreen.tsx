@@ -1,222 +1,193 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Alert, ActivityIndicator } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
-import { ChevronLeft, ChevronRight } from 'lucide-react-native';
-import { colors, fonts, radius, spacing } from '../theme/tokens';
-import { sessionsApi, type MemberSessionSummary } from '../services/sessionsApi';
-import type { RootStackParamList } from '../navigation/RootNavigator';
+import { ChevronLeft, ChevronRight, CalendarPlus } from 'lucide-react-native';
+import { colors, fonts, spacing } from '../theme/tokens';
 import { Screen } from '../components/Screen';
+import { Glass } from '../components/uv/Glass';
+import { PillButton, UnderlineTabs, MetricLabel } from '../components/uv/Ui';
+import { EmptyState } from '../components/EmptyState';
+import { memberApi, type Workout, type AvailableSession } from '../services/memberApi';
+import { dayKey, fmtDate, isDone, pts, when } from '../lib/format';
+import { ApiError } from '../services/api';
+import type { RootStackParamList } from '../navigation/RootNavigator';
 
-const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-type DayStatus = 'completed' | 'active' | 'scheduled';
-const STATUS_COLOURS: Record<DayStatus, string> = {
-  completed: colors.destructive,
-  active: colors.success,
-  scheduled: colors.warning,
-};
-const STATUS_LABELS: Record<DayStatus, string> = {
-  completed: 'Completed',
-  active: 'Active',
-  scheduled: 'Scheduled',
-};
-
-function dateKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function sessionDate(s: MemberSessionSummary): Date | null {
-  const raw = s.session.startedAt ?? s.session.scheduledAt ?? s.enrolledAt;
-  return raw ? new Date(raw) : null;
-}
-
-function statusFor(s: MemberSessionSummary): DayStatus {
-  if (s.session.status === 'completed') return 'completed';
-  if (s.session.status === 'in_progress') return 'active';
-  return 'scheduled';
-}
-
-// Priority when a day has more than one session status — most
-// "finished" / notable wins the dot colour, matching the legend order
-// in the reference design (Completed > Active > Scheduled).
-const STATUS_PRIORITY: DayStatus[] = ['completed', 'active', 'scheduled'];
+type Tab = 'calendar' | 'book';
+const DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 export function WorkoutScreen() {
-  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const [sessions, setSessions] = useState<MemberSessionSummary[]>([]);
-  const [month, setMonth] = useState(() => { const d = new Date(); d.setDate(1); return d; });
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const nav = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const [tab, setTab] = useState<Tab>('calendar');
+  const [workouts, setWorkouts] = useState<Workout[]>([]);
+  const [available, setAvailable] = useState<AvailableSession[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [cursor, setCursor] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+  const [selected, setSelected] = useState(() => dayKey(new Date()));
 
   const load = useCallback(async () => {
-    try {
-      setSessions(await sessionsApi.mine());
-    } catch {
-      // Calendar just shows empty for the month; not worth a blocking error screen.
-    }
+    const [w, a] = await Promise.all([memberApi.workouts().catch(() => null), memberApi.available().catch(() => null)]);
+    if (w) setWorkouts(w);
+    if (a) setAvailable(a);
+    setLoading(false);
   }, []);
-
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const byDate = useMemo(() => {
-    const map = new Map<string, MemberSessionSummary[]>();
-    for (const s of sessions) {
-      const d = sessionDate(s);
-      if (!d) continue;
-      const key = dateKey(d);
-      const list = map.get(key) ?? [];
-      list.push(s);
-      map.set(key, list);
-    }
-    return map;
-  }, [sessions]);
+  // Everything that belongs on the calendar: finished workouts + booked upcoming sessions.
+  const byDay = useMemo(() => {
+    const m = new Map<string, { workouts: Workout[]; booked: AvailableSession[] }>();
+    const slot = (k: string) => { if (!m.has(k)) m.set(k, { workouts: [], booked: [] }); return m.get(k)!; };
+    for (const w of workouts) { const t = when(w); if (t && isDone(w)) slot(dayKey(new Date(t))).workouts.push(w); }
+    for (const s of available) if (s.isBooked) slot(dayKey(new Date(s.scheduledAt))).booked.push(s);
+    return m;
+  }, [workouts, available]);
 
-  const todayKey = dateKey(new Date());
+  const cells = useMemo(() => {
+    const first = cursor.getDay();
+    const days = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate();
+    return [...Array(first).fill(null), ...Array.from({ length: days }, (_, i) => new Date(cursor.getFullYear(), cursor.getMonth(), i + 1))] as (Date | null)[];
+  }, [cursor]);
 
-  const grid = useMemo(() => {
-    const year = month.getFullYear();
-    const m = month.getMonth();
-    const firstWeekday = new Date(year, m, 1).getDay();
-    const daysInMonth = new Date(year, m + 1, 0).getDate();
-    const cells: (Date | null)[] = [];
-    for (let i = 0; i < firstWeekday; i++) cells.push(null);
-    for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, m, d));
-    while (cells.length % 7 !== 0) cells.push(null);
-    return cells;
-  }, [month]);
+  const sel = byDay.get(selected);
+  const todayKey = dayKey(new Date());
 
-  const selectedSessions = selectedKey ? (byDate.get(selectedKey) ?? []) : [];
+  const book = async (s: AvailableSession) => {
+    setBusy(s.id);
+    try { await memberApi.book(s.id); await load(); }
+    catch (e) { Alert.alert('Could not book', e instanceof ApiError ? e.message : 'Try again.'); }
+    finally { setBusy(null); }
+  };
+  const cancel = (s: AvailableSession) =>
+    Alert.alert('Cancel booking?', `${s.name} · ${fmtDate(s.scheduledAt)}`, [
+      { text: 'Keep it', style: 'cancel' },
+      { text: 'Cancel booking', style: 'destructive', onPress: async () => {
+        setBusy(s.id);
+        try { await memberApi.cancelBooking(s.id); await load(); }
+        catch (e) { Alert.alert('Could not cancel', e instanceof ApiError ? e.message : 'Try again.'); }
+        finally { setBusy(null); }
+      } },
+    ]);
+
+  const upcoming = [...available].sort((a, b) => +new Date(a.scheduledAt) - +new Date(b.scheduledAt));
 
   return (
-    <Screen edges={['top']} style={styles.root}>
-    <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <Text style={styles.heading}>Workout</Text>
+    <Screen edges={['top']}>
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={refreshing} tintColor={colors.primary} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} />}
+      >
+        <Text style={styles.heading}>Workout</Text>
+        <UnderlineTabs value={tab} onChange={setTab} tabs={[{ key: 'calendar', label: 'Calendar' }, { key: 'book', label: 'Book', badge: upcoming.filter((s) => !s.isBooked).length || undefined }]} />
 
-      <View style={styles.monthNav}>
-        <TouchableOpacity onPress={() => setMonth((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1))} style={styles.navButton} hitSlop={10}>
-          <ChevronLeft size={18} color={colors.foreground} />
-        </TouchableOpacity>
-        <Text style={styles.monthLabel}>{month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</Text>
-        <TouchableOpacity onPress={() => setMonth((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1))} style={styles.navButton} hitSlop={10}>
-          <ChevronRight size={18} color={colors.foreground} />
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.weekdayRow}>
-        {WEEKDAY_LABELS.map((w) => (
-          <Text key={w} style={styles.weekdayLabel}>{w}</Text>
-        ))}
-      </View>
-
-      <View style={styles.grid}>
-        {grid.map((d, i) => {
-          if (!d) return <View key={i} style={styles.cell} />;
-          const key = dateKey(d);
-          const daySessions = byDate.get(key) ?? [];
-          const isToday = key === todayKey;
-          const isSelected = key === selectedKey;
-          const status = STATUS_PRIORITY.find((st) => daySessions.some((s) => statusFor(s) === st));
-
-          return (
-            <TouchableOpacity
-              key={i}
-              style={styles.cell}
-              onPress={() => setSelectedKey((prev) => (prev === key ? null : key))}
-              activeOpacity={0.7}
-            >
-              <View style={[styles.dayCircle, isSelected && styles.dayCircleSelected, isToday && !isSelected && styles.dayCircleToday]}>
-                <Text style={[styles.dayText, (isSelected || isToday) && styles.dayTextActive]}>{d.getDate()}</Text>
+        {loading ? <ActivityIndicator color={colors.primary} style={{ marginTop: spacing.xl }} /> : tab === 'calendar' ? (
+          <>
+            <Glass style={{ padding: spacing.lg }}>
+              <View style={styles.monthRow}>
+                <TouchableOpacity hitSlop={10} onPress={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}><ChevronLeft size={20} color={colors.foreground} /></TouchableOpacity>
+                <Text style={styles.month}>{cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</Text>
+                <TouchableOpacity hitSlop={10} onPress={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}><ChevronRight size={20} color={colors.foreground} /></TouchableOpacity>
               </View>
-              {status && <View style={[styles.dot, { backgroundColor: STATUS_COLOURS[status] }]} />}
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+              <View style={styles.grid}>
+                {DOW.map((d, i) => <Text key={i} style={styles.dow}>{d}</Text>)}
+                {cells.map((d, i) => {
+                  if (!d) return <View key={i} style={styles.cell} />;
+                  const k = dayKey(d); const info = byDay.get(k); const on = k === selected;
+                  return (
+                    <TouchableOpacity key={i} style={styles.cell} onPress={() => setSelected(k)} activeOpacity={0.8}>
+                      <View style={[styles.day, on && styles.dayOn, k === todayKey && !on && styles.dayToday]}>
+                        <Text style={[styles.dayText, on && { color: '#fff' }]}>{d.getDate()}</Text>
+                      </View>
+                      <View style={styles.dots}>
+                        {info?.workouts.length ? <View style={[styles.dotMark, { backgroundColor: colors.primary }]} /> : null}
+                        {info?.booked.length ? <View style={[styles.dotMark, { backgroundColor: colors.recovery }]} /> : null}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <View style={styles.legend}>
+                <Legend color={colors.primary} text="Workout" /><Legend color={colors.recovery} text="Booked" />
+              </View>
+            </Glass>
 
-      <View style={styles.legend}>
-        {(['completed', 'active', 'scheduled'] as DayStatus[]).map((s) => (
-          <View key={s} style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: STATUS_COLOURS[s] }]} />
-            <Text style={styles.legendLabel}>{STATUS_LABELS[s]}</Text>
+            <MetricLabel style={{ marginTop: spacing.xl, marginBottom: spacing.md }}>{new Date(Number(selected.split('-')[0]), Number(selected.split('-')[1]), Number(selected.split('-')[2])).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</MetricLabel>
+            {!sel || (!sel.workouts.length && !sel.booked.length) ? (
+              <Glass tone="soft" style={styles.empty}><Text style={styles.meta}>Nothing on this day.</Text></Glass>
+            ) : (
+              <View style={{ gap: spacing.sm }}>
+                {sel.workouts.map((w) => (
+                  <TouchableOpacity key={w.id} activeOpacity={0.85} onPress={() => nav.navigate('WorkoutDetail', { sessionId: w.sessionId })}>
+                    <Glass style={styles.item}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.itemTitle}>{w.session.name}</Text>
+                        <Text style={styles.meta}>{pts(w)} pts · {Math.round(w.calories ?? 0)} kcal{w.avgHr ? ` · ${Math.round(w.avgHr)} bpm` : ''}</Text>
+                      </View>
+                      <ChevronRight size={18} color={colors.mutedForeground} />
+                    </Glass>
+                  </TouchableOpacity>
+                ))}
+                {sel.booked.map((s) => (
+                  <Glass key={s.id} style={styles.item}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemTitle}>{s.name}</Text>
+                      <Text style={styles.meta}>{fmtDate(s.scheduledAt)} · booked</Text>
+                    </View>
+                    <PillButton variant="glass" label="Cancel" disabled={busy === s.id} onPress={() => cancel(s)} />
+                  </Glass>
+                ))}
+              </View>
+            )}
+          </>
+        ) : upcoming.length === 0 ? (
+          <EmptyState icon={CalendarPlus} title="No sessions to book" subtitle="Your gym hasn't scheduled upcoming sessions yet. Check back soon." />
+        ) : (
+          <View style={{ gap: spacing.sm }}>
+            {upcoming.map((s) => (
+              <Glass key={s.id} style={styles.item}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.itemTitle}>{s.name}</Text>
+                  <Text style={styles.meta}>{fmtDate(s.scheduledAt)}{s.trainer?.name ? ` · ${s.trainer.name}` : ''}</Text>
+                  <Text style={[styles.meta, { color: s.spotsOpen ? colors.recovery : colors.destructive }]}>{s.spotsOpen ? `${s.spotsOpen} spot${s.spotsOpen === 1 ? '' : 's'} open` : 'Full'}</Text>
+                </View>
+                {s.isBooked ? (
+                  <PillButton variant="glass" label="Cancel" disabled={busy === s.id} onPress={() => cancel(s)} />
+                ) : (
+                  <PillButton label={busy === s.id ? '…' : 'Book'} disabled={busy === s.id || !s.spotsOpen} onPress={() => book(s)} />
+                )}
+              </Glass>
+            ))}
           </View>
-        ))}
-      </View>
-
-      {selectedKey && (
-        <View style={styles.daySection}>
-          <Text style={styles.daySectionTitle}>
-            {new Date(selectedKey).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
-          </Text>
-          {selectedSessions.length === 0 ? (
-            <Text style={styles.emptyText}>Nothing on this day.</Text>
-          ) : (
-            <View style={{ gap: spacing.sm }}>
-              {selectedSessions.map((s) => (
-                <TouchableOpacity
-                  key={s.id}
-                  style={styles.sessionRow}
-                  activeOpacity={0.85}
-                  onPress={() => s.session.status === 'completed' && navigation.navigate('SessionDetail', { sessionId: s.sessionId })}
-                >
-                  <View style={[styles.zoneDot, { backgroundColor: STATUS_COLOURS[statusFor(s)] }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.sessionName}>{s.session.name}</Text>
-                    <Text style={styles.sessionMeta}>
-                      {s.session.trainer?.name ?? s.session.gym?.name ?? ''} · {STATUS_LABELS[statusFor(s)]}
-                    </Text>
-                  </View>
-                  {s.session.status === 'completed' && (
-                    <Text style={styles.sessionStat}>{s.calories != null ? `${Math.round(s.calories)} kcal` : '—'}</Text>
-                  )}
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-        </View>
-      )}
-    </ScrollView>
+        )}
+      </ScrollView>
     </Screen>
   );
 }
 
-const CELL_SIZE = 40;
+function Legend({ color, text }: { color: string; text: string }) {
+  return <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}><View style={[styles.dotMark, { backgroundColor: color }]} /><Text style={styles.legendText}>{text}</Text></View>;
+}
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.background },
-  content: { padding: spacing.lg, paddingTop: spacing.xxl, paddingBottom: spacing.xxl },
-  heading: { fontFamily: fonts.heading, fontSize: 24, color: colors.foreground, marginBottom: spacing.lg },
-
-  monthNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.md },
-  navButton: { width: 32, height: 32, borderRadius: radius.sm, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center' },
-  monthLabel: { fontFamily: fonts.heading, fontSize: 17, color: colors.foreground },
-
-  weekdayRow: { flexDirection: 'row', marginBottom: spacing.xs },
-  weekdayLabel: { flex: 1, textAlign: 'center', fontFamily: fonts.bodyMedium, fontSize: 11, color: colors.mutedForeground },
-
+  content: { paddingHorizontal: spacing.xl, paddingTop: spacing.lg, paddingBottom: 130 },
+  heading: { fontFamily: fonts.heading, fontSize: 30, letterSpacing: -0.5, color: colors.foreground, marginBottom: spacing.lg },
+  monthRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.md },
+  month: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.foreground },
   grid: { flexDirection: 'row', flexWrap: 'wrap' },
-  cell: { width: `${100 / 7}%`, height: CELL_SIZE + 12, alignItems: 'center', justifyContent: 'flex-start', paddingTop: spacing.xs },
-  dayCircle: { width: CELL_SIZE, height: CELL_SIZE, borderRadius: CELL_SIZE / 2, alignItems: 'center', justifyContent: 'center' },
-  dayCircleSelected: { backgroundColor: colors.primary },
-  dayCircleToday: { borderWidth: 1.5, borderColor: colors.primary },
-  dayText: { fontFamily: fonts.body, fontSize: 14, color: colors.foreground },
-  dayTextActive: { fontFamily: fonts.bodySemiBold, color: colors.primaryForeground },
-  dot: { width: 5, height: 5, borderRadius: 2.5, marginTop: 3 },
-
-  legend: { flexDirection: 'row', justifyContent: 'center', gap: spacing.lg, marginTop: spacing.lg, paddingBottom: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 8, height: 8, borderRadius: 4 },
-  legendLabel: { fontFamily: fonts.body, fontSize: 12, color: colors.mutedForeground },
-
-  daySection: { marginTop: spacing.lg },
-  daySectionTitle: { fontFamily: fonts.headingMedium, fontSize: 15, color: colors.foreground, marginBottom: spacing.sm },
-  emptyText: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground },
-
-  sessionRow: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.md, backgroundColor: colors.card, borderRadius: radius.lg,
-    borderWidth: 1, borderColor: colors.border, padding: spacing.md,
-  },
-  zoneDot: { width: 10, height: 10, borderRadius: 5 },
-  sessionName: { fontFamily: fonts.headingMedium, fontSize: 14, color: colors.foreground },
-  sessionMeta: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground, marginTop: 2 },
-  sessionStat: { fontFamily: fonts.bodySemiBold, fontSize: 13, color: colors.primary },
+  dow: { width: '14.285%', textAlign: 'center', fontFamily: fonts.bodySemiBold, fontSize: 10, color: colors.mutedForeground, marginBottom: 6 },
+  cell: { width: '14.285%', alignItems: 'center', paddingVertical: 3, minHeight: 46 },
+  day: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  dayOn: { backgroundColor: colors.primary },
+  dayToday: { borderWidth: 1, borderColor: colors.primary },
+  dayText: { fontFamily: fonts.metric, fontSize: 13, color: colors.foreground },
+  dots: { flexDirection: 'row', gap: 3, height: 6, marginTop: 2 },
+  dotMark: { width: 5, height: 5, borderRadius: 3 },
+  legend: { flexDirection: 'row', gap: spacing.lg, marginTop: spacing.md, justifyContent: 'center' },
+  legendText: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground },
+  empty: { padding: spacing.lg },
+  item: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.lg },
+  itemTitle: { fontFamily: fonts.bodySemiBold, fontSize: 15, color: colors.foreground },
+  meta: { fontFamily: fonts.body, fontSize: 12, color: colors.mutedForeground, marginTop: 3 },
 });

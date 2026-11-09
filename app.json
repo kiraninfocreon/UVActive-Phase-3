@@ -3,18 +3,18 @@
     "name": "UV Active",
     "slug": "uvactive-member",
     "version": "1.0.0",
-    "orientation": "default",
+    "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#161312",
+    "backgroundColor": "#09090B",
     "icon": "./assets/icon.png",
     "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#161312"
+      "backgroundColor": "#09090B"
     },
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "in.uvactive.member",
       "icon": "./assets/icon.png",
       "infoPlist": {
@@ -23,10 +23,11 @@
     },
     "android": {
       "package": "in.uvactive.member",
+      "versionCode": 1,
       "edgeToEdgeEnabled": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#161312"
+        "backgroundColor": "#09090B"
       },
       "permissions": [
         "android.permission.INTERNET",
@@ -40,17 +41,14 @@
     "plugins": [
       "expo-font",
       "expo-secure-store",
-      "expo-sqlite",
-      "./plugins/with-abi-filters",
       [
         "expo-notifications",
         {
           "icon": "./assets/icon.png",
-          "color": "#E74A23"
+          "color": "#FB5061"
         }
       ]
     ],
-    "config": {},
     "extra": {
       "eas": {
         "projectId": "REPLACE_WITH_NEW_EAS_PROJECT_ID"

@@ -1,246 +1,139 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, Alert, TouchableOpacity } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { Eye, EyeOff, LogOut, KeyRound, User, Ruler } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../theme/tokens';
-import { useAuth } from '../hooks/useAuth';
-import { membersApi, type MemberFullProfile, type Sex } from '../services/membersApi';
-import { changePin, ApiError } from '../services/api';
 import { Screen } from '../components/Screen';
+import { Glass } from '../components/uv/Glass';
+import { Avatar } from '../components/uv/Avatar';
+import { PillButton, SectionTitle, UnderlineTabs } from '../components/uv/Ui';
+import { Field } from './LoginScreen';
+import { useAuth } from '../hooks/useAuth';
+import { memberApi, type MemberDetail, type Sex } from '../services/memberApi';
+import { ApiError } from '../services/api';
+
+const SEXES: { key: Sex; label: string }[] = [{ key: 'female', label: 'Female' }, { key: 'male', label: 'Male' }, { key: 'other', label: 'Other' }];
+const msg = (e: unknown) => (e instanceof ApiError ? e.message : 'Something went wrong. Try again.');
+const num = (s: string) => (s.trim() === '' ? undefined : Number(s));
 
 export function SettingsScreen() {
   const { member, logout } = useAuth();
-  const [profile, setProfile] = useState<MemberFullProfile | null>(null);
+  const [me, setMe] = useState<MemberDetail | null>(null);
+  const [sex, setSex] = useState<Sex | null>(null);
+  const [age, setAge] = useState(''); const [height, setHeight] = useState('');
+  const [weight, setWeight] = useState(''); const [rhr, setRhr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [section, setSection] = useState<'body' | 'security'>('body');
 
-  const load = useCallback(() => {
-    membersApi.me().then(setProfile).catch(() => {});
+  const [curPin, setCurPin] = useState(''); const [newPin, setNewPin] = useState('');
+  const [curPw, setCurPw] = useState(''); const [newPw, setNewPw] = useState('');
+  const [busy, setBusy] = useState<'pin' | 'pw' | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const m = await memberApi.me();
+      setMe(m); setSex(m.sex ?? null);
+      setAge(m.ageYears?.toString() ?? ''); setHeight(m.heightCm?.toString() ?? '');
+      setWeight(m.weightKg?.toString() ?? ''); setRhr(m.restingHr?.toString() ?? '');
+    } catch { /* offline: leave blank */ }
   }, []);
-
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  const saveBody = async () => {
+    const payload = { sex: sex ?? undefined, ageYears: num(age), heightCm: num(height), weightKg: num(weight), restingHr: num(rhr) };
+    if ([payload.ageYears, payload.heightCm, payload.weightKg, payload.restingHr].some((v) => v !== undefined && (!Number.isFinite(v) || v <= 0))) {
+      return Alert.alert('Check your numbers', 'Age, height, weight and resting heart rate must be positive numbers.');
+    }
+    if (payload.ageYears !== undefined && !Number.isInteger(payload.ageYears)) return Alert.alert('Check your numbers', 'Age must be a whole number.');
+    if (payload.restingHr !== undefined && !Number.isInteger(payload.restingHr)) return Alert.alert('Check your numbers', 'Resting heart rate must be a whole number.');
+    setSaving(true);
+    try { setMe(await memberApi.updateBody(payload)); Alert.alert('Saved', 'Your body details were updated. Your heart-rate zones use these.'); }
+    catch (e) { Alert.alert('Could not save', msg(e)); } finally { setSaving(false); }
+  };
+
+  const changePin = async () => {
+    setBusy('pin');
+    try { await memberApi.changePin(curPin, newPin); setCurPin(''); setNewPin(''); Alert.alert('PIN changed'); }
+    catch (e) { Alert.alert('Could not change PIN', msg(e)); } finally { setBusy(null); }
+  };
+  const changePw = async () => {
+    setBusy('pw');
+    try { await memberApi.changePassword(curPw, newPw); setCurPw(''); setNewPw(''); Alert.alert('Password changed'); }
+    catch (e) { Alert.alert('Could not change password', msg(e)); } finally { setBusy(null); }
+  };
+
+  const confirmLogout = () => Alert.alert('Sign out?', undefined, [{ text: 'Cancel', style: 'cancel' }, { text: 'Sign out', style: 'destructive', onPress: () => logout() }]);
+
   return (
-    <Screen edges={['top']} style={styles.root}>
-    <ScrollView contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Settings</Text>
+    <Screen edges={['top']}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <Text style={styles.heading}>Settings</Text>
 
-      <IdentityCard profile={profile} fallbackName={member?.name} />
-      {profile && <BioCard profile={profile} onSaved={setProfile} />}
-      <ChangePinCard />
+        <Glass style={styles.profile}>
+          <Avatar sex={sex ?? me?.sex} seed={member?.id ?? ''} size={64} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.name}>{member?.name}</Text>
+            <Text style={styles.meta}>{member?.memberCode}{me?.currentGym?.name ? ` · ${me.currentGym.name}` : ''}</Text>
+            {member?.email ? <Text style={styles.meta}>{member.email}</Text> : null}
+          </View>
+        </Glass>
 
-      <TouchableOpacity style={styles.signOutButton} onPress={() => logout()}>
-        <LogOut size={18} color={colors.destructive} />
-        <Text style={styles.signOutText}>Sign Out</Text>
-      </TouchableOpacity>
-    </ScrollView>
+        <View style={{ marginTop: spacing.xl }}>
+          <UnderlineTabs value={section} onChange={setSection} tabs={[{ key: 'body', label: 'Body' }, { key: 'security', label: 'Security' }]} />
+        </View>
+
+        {section === 'body' ? (
+          <Glass style={{ padding: spacing.xl }}>
+            <Text style={styles.label}>Sex (sets your avatar and calorie formula)</Text>
+            <View style={styles.seg}>
+              {SEXES.map((s) => (
+                <TouchableOpacity key={s.key} onPress={() => setSex(s.key)} style={[styles.segItem, sex === s.key && styles.segOn]} activeOpacity={0.85}>
+                  <Text style={[styles.segText, sex === s.key && { color: '#fff' }]}>{s.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.two}>
+              <View style={{ flex: 1 }}><Field label="Weight (kg)" value={weight} onChangeText={setWeight} keyboardType="decimal-pad" /></View>
+              <View style={{ flex: 1 }}><Field label="Height (cm)" value={height} onChangeText={setHeight} keyboardType="decimal-pad" /></View>
+            </View>
+            <View style={styles.two}>
+              <View style={{ flex: 1 }}><Field label="Age" value={age} onChangeText={setAge} keyboardType="number-pad" /></View>
+              <View style={{ flex: 1 }}><Field label="Resting HR" value={rhr} onChangeText={setRhr} keyboardType="number-pad" /></View>
+            </View>
+            <PillButton label={saving ? 'Saving…' : 'Save changes'} disabled={saving} onPress={saveBody} />
+          </Glass>
+        ) : (
+          <>
+            <Glass style={{ padding: spacing.xl }}>
+              <SectionTitle>Change PIN</SectionTitle>
+              <Field label="Current PIN" value={curPin} onChangeText={(t) => setCurPin(t.replace(/\D/g, '').slice(0, 6))} secure keyboardType="number-pad" />
+              <Field label="New PIN (6 digits)" value={newPin} onChangeText={(t) => setNewPin(t.replace(/\D/g, '').slice(0, 6))} secure keyboardType="number-pad" />
+              <PillButton label={busy === 'pin' ? 'Updating…' : 'Update PIN'} disabled={busy !== null || curPin.length !== 6 || newPin.length !== 6} onPress={changePin} />
+            </Glass>
+            <Glass style={{ padding: spacing.xl, marginTop: spacing.lg }}>
+              <SectionTitle>Change password</SectionTitle>
+              <Field label="Current password" value={curPw} onChangeText={setCurPw} secure />
+              <Field label="New password (min 8 characters)" value={newPw} onChangeText={setNewPw} secure />
+              <PillButton label={busy === 'pw' ? 'Updating…' : 'Update password'} disabled={busy !== null || !curPw || newPw.length < 8} onPress={changePw} />
+            </Glass>
+          </>
+        )}
+
+        <PillButton variant="danger" label="Sign out" onPress={confirmLogout} style={{ marginTop: spacing.xxl }} />
+      </ScrollView>
     </Screen>
   );
 }
 
-// ── Read-only identity — name/phone/email/member ID only change via
-// the Branch Portal / Admin Panel, never from the Member App. ──────────
-function IdentityCard({ profile, fallbackName }: { profile: MemberFullProfile | null; fallbackName?: string }) {
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <User size={16} color={colors.primary} />
-        <Text style={styles.cardTitle}>Profile</Text>
-      </View>
-      <ReadOnlyRow label="Name" value={profile?.name ?? fallbackName ?? '—'} />
-      <ReadOnlyRow label="Member ID" value={profile?.memberCode ?? '—'} />
-      <ReadOnlyRow label="Phone" value={profile?.phone ?? '—'} />
-      <ReadOnlyRow label="Email" value={profile?.email ?? '—'} />
-      <ReadOnlyRow label="Gym" value={profile?.currentGym?.name ?? 'Unassigned'} />
-      <Text style={styles.note}>To change your name, phone, or email, ask staff at your gym's front desk.</Text>
-    </View>
-  );
-}
-
-function ReadOnlyRow({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.readOnlyRow}>
-      <Text style={styles.readOnlyLabel}>{label}</Text>
-      <Text style={styles.readOnlyValue}>{value}</Text>
-    </View>
-  );
-}
-
-// ── Bio fields — the only things a member can self-edit ────────────────
-function BioCard({ profile, onSaved }: { profile: MemberFullProfile; onSaved: (p: MemberFullProfile) => void }) {
-  const [sex, setSex] = useState<Sex>(profile.sex ?? 'male');
-  const [age, setAge] = useState(profile.ageYears?.toString() ?? '');
-  const [heightCm, setHeightCm] = useState(profile.heightCm?.toString() ?? '');
-  const [weightKg, setWeightKg] = useState(profile.weightKg?.toString() ?? '');
-  const [restingHr, setRestingHr] = useState(profile.restingHr?.toString() ?? '');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setSex(profile.sex ?? 'male');
-    setAge(profile.ageYears?.toString() ?? '');
-    setHeightCm(profile.heightCm?.toString() ?? '');
-    setWeightKg(profile.weightKg?.toString() ?? '');
-    setRestingHr(profile.restingHr?.toString() ?? '');
-  }, [profile]);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const updated = await membersApi.updateBio({
-        sex,
-        ageYears: age ? Number(age) : undefined,
-        heightCm: heightCm ? Number(heightCm) : undefined,
-        weightKg: weightKg ? Number(weightKg) : undefined,
-        restingHr: restingHr ? Number(restingHr) : undefined,
-      });
-      onSaved(updated);
-      Alert.alert('Saved', 'Your details were updated. This keeps your zone, calorie, and EPOC numbers accurate.');
-    } catch (e) {
-      Alert.alert('Could not save', e instanceof ApiError ? e.message : 'Something went wrong.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <Ruler size={16} color={colors.primary} />
-        <Text style={styles.cardTitle}>Body Stats</Text>
-      </View>
-      <Text style={styles.note}>Used to calculate your heart-rate zones, calories, and afterburn (EPOC) accurately.</Text>
-
-      <Text style={styles.label}>Sex</Text>
-      <View style={styles.segmentRow}>
-        {(['male', 'female', 'other'] as Sex[]).map((s) => (
-          <TouchableOpacity key={s} style={[styles.segment, sex === s && styles.segmentActive]} onPress={() => setSex(s)}>
-            <Text style={[styles.segmentText, sex === s && styles.segmentTextActive]}>{s[0].toUpperCase() + s.slice(1)}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      <Text style={styles.label}>Age (years)</Text>
-      <TextInput style={styles.input} value={age} onChangeText={setAge} keyboardType="number-pad" placeholderTextColor={colors.mutedForeground} />
-
-      <Text style={styles.label}>Height (cm)</Text>
-      <TextInput style={styles.input} value={heightCm} onChangeText={setHeightCm} keyboardType="decimal-pad" placeholderTextColor={colors.mutedForeground} />
-
-      <Text style={styles.label}>Weight (kg)</Text>
-      <TextInput style={styles.input} value={weightKg} onChangeText={setWeightKg} keyboardType="decimal-pad" placeholderTextColor={colors.mutedForeground} />
-
-      <Text style={styles.label}>Resting heart rate (bpm)</Text>
-      <TextInput style={styles.input} value={restingHr} onChangeText={setRestingHr} keyboardType="number-pad" placeholderTextColor={colors.mutedForeground} />
-
-      <TouchableOpacity style={styles.saveButton} onPress={save} disabled={saving}>
-        {saving ? <ActivityIndicator color={colors.primaryForeground} /> : <Text style={styles.saveButtonText}>Save</Text>}
-      </TouchableOpacity>
-    </View>
-  );
-}
-
-// ── Change PIN — member-initiated, requires current PIN ─────────────────
-function ChangePinCard() {
-  const [current, setCurrent] = useState('');
-  const [next, setNext] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [show, setShow] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const mismatch = confirm.length > 0 && next !== confirm;
-  const tooShort = next.length > 0 && next.length !== 6;
-  const valid = current.length > 0 && next.length === 6 && next === confirm;
-
-  const submit = async () => {
-    if (!valid) return;
-    setSaving(true);
-    try {
-      await changePin(current, next);
-      setCurrent(''); setNext(''); setConfirm('');
-      Alert.alert('PIN updated', 'Use your new PIN next time you sign in.');
-    } catch (e) {
-      Alert.alert('Could not update PIN', e instanceof ApiError ? e.message : 'Check your current PIN.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <KeyRound size={16} color={colors.primary} />
-        <Text style={styles.cardTitle}>Change PIN</Text>
-      </View>
-
-      <Text style={styles.label}>Current PIN</Text>
-      <PinField value={current} onChangeText={setCurrent} show={show} setShow={setShow} />
-
-      <Text style={styles.label}>New PIN (6 digits)</Text>
-      <PinField value={next} onChangeText={setNext} show={show} setShow={setShow} />
-      {tooShort && <Text style={styles.errorText}>PIN must be exactly 6 digits.</Text>}
-
-      <Text style={styles.label}>Confirm new PIN</Text>
-      <PinField value={confirm} onChangeText={setConfirm} show={show} setShow={setShow} />
-      {mismatch && <Text style={styles.errorText}>PINs don't match.</Text>}
-
-      <TouchableOpacity style={[styles.saveButton, !valid && styles.saveButtonDisabled]} onPress={submit} disabled={!valid || saving}>
-        {saving ? <ActivityIndicator color={colors.primaryForeground} /> : <Text style={styles.saveButtonText}>Update PIN</Text>}
-      </TouchableOpacity>
-    </View>
-  );
-}
-
-function PinField({ value, onChangeText, show, setShow }: { value: string; onChangeText: (t: string) => void; show: boolean; setShow: (v: boolean) => void }) {
-  return (
-    <View style={styles.pinRow}>
-      <TextInput
-        style={[styles.input, styles.pinInput]}
-        value={value}
-        onChangeText={(t) => onChangeText(t.replace(/[^0-9]/g, '').slice(0, 6))}
-        secureTextEntry={!show}
-        keyboardType="number-pad"
-        maxLength={6}
-        placeholderTextColor={colors.mutedForeground}
-      />
-      <TouchableOpacity style={styles.eyeButton} onPress={() => setShow(!show)} hitSlop={10}>
-        {show ? <EyeOff size={17} color={colors.mutedForeground} /> : <Eye size={17} color={colors.mutedForeground} />}
-      </TouchableOpacity>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.background },
-  content: { padding: spacing.lg, paddingBottom: spacing.xxl, gap: spacing.md },
-  heading: { fontFamily: fonts.heading, fontSize: 24, color: colors.foreground, marginBottom: spacing.sm },
-  card: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginBottom: spacing.sm },
-  cardTitle: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.foreground },
-
-  readOnlyRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
-  readOnlyLabel: { fontFamily: fonts.body, fontSize: 12, color: colors.mutedForeground },
-  readOnlyValue: { fontFamily: fonts.bodyMedium, fontSize: 13, color: colors.foreground },
-
-  label: { fontFamily: fonts.bodyMedium, fontSize: 12, color: colors.mutedForeground, marginTop: spacing.sm, marginBottom: spacing.xs },
-  input: {
-    backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm,
-    paddingHorizontal: spacing.md, paddingVertical: spacing.sm, fontFamily: fonts.body, fontSize: 14, color: colors.foreground,
-  },
-  segmentRow: { flexDirection: 'row', gap: spacing.xs },
-  segment: { flex: 1, borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm, paddingVertical: spacing.sm, alignItems: 'center' },
-  segmentActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  segmentText: { fontFamily: fonts.bodyMedium, fontSize: 12, color: colors.mutedForeground },
-  segmentTextActive: { color: colors.primaryForeground },
-
-  pinRow: { position: 'relative', justifyContent: 'center' },
-  pinInput: { paddingRight: 40, letterSpacing: 3 },
-  eyeButton: { position: 'absolute', right: spacing.sm },
-  errorText: { color: colors.destructive, fontFamily: fonts.body, fontSize: 11, marginTop: 4 },
-  saveButton: { backgroundColor: colors.primary, borderRadius: radius.sm, paddingVertical: spacing.sm, alignItems: 'center', marginTop: spacing.md },
-  saveButtonDisabled: { opacity: 0.5 },
-  saveButtonText: { fontFamily: fonts.bodySemiBold, color: colors.primaryForeground, fontSize: 14 },
-  note: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground, marginTop: spacing.xs, marginBottom: spacing.xs },
-
-  signOutButton: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm,
-    borderWidth: 1, borderColor: colors.destructive, borderRadius: radius.md, paddingVertical: spacing.md, marginTop: spacing.md,
-  },
-  signOutText: { color: colors.destructive, fontFamily: fonts.bodySemiBold, fontSize: 15 },
+  content: { paddingHorizontal: spacing.xl, paddingTop: spacing.lg, paddingBottom: 130 },
+  heading: { fontFamily: fonts.heading, fontSize: 30, letterSpacing: -0.5, color: colors.foreground, marginBottom: spacing.lg },
+  profile: { flexDirection: 'row', alignItems: 'center', gap: spacing.lg, padding: spacing.lg },
+  name: { fontFamily: fonts.heading, fontSize: 20, color: colors.foreground },
+  meta: { fontFamily: fonts.body, fontSize: 12, color: colors.mutedForeground, marginTop: 3 },
+  label: { fontFamily: fonts.bodySemiBold, fontSize: 10, letterSpacing: 1.6, textTransform: 'uppercase', color: colors.mutedForeground, marginBottom: 8 },
+  seg: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.lg },
+  segItem: { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: radius.full, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassBorder },
+  segOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  segText: { fontFamily: fonts.bodySemiBold, fontSize: 13, color: colors.mutedForeground },
+  two: { flexDirection: 'row', gap: spacing.md },
 });

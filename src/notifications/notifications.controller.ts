@@ -14,6 +14,12 @@ export class MemberNotificationsController {
     return this.notifications.listForRecipient('member', user.sub, unread === 'true');
   }
 
+  // Declared before ':id/read' so the literal path wins.
+  @Post('read-all')
+  markAllRead(@CurrentUser() user: AuthenticatedUser) {
+    return this.notifications.markAllRead('member', user.sub);
+  }
+
   @Post(':id/read')
   markRead(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
     return this.notifications.markRead(id, 'member', user.sub);

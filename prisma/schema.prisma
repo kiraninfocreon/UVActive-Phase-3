@@ -452,6 +452,17 @@ model SessionMember {
   // Null when the session had no target-zone intervals to score.
   consistencyPct Float?   @map("consistency_pct")
 
+  // Per-member participation window, sent by the Trainer App at session
+  // end. A late joiner or an early leaver only trained for part of the
+  // session, so calories/EPOC must be scaled to THEIR active time, never
+  // the whole session length (that inflated late joiners' calories).
+  // activeSeconds = seconds actually scored for this member (measured +
+  // bounded gap-fill). Null on rows written before this column existed;
+  // recalculation then derives it from the stored readings.
+  joinedAt      DateTime? @map("joined_at")
+  leftAt        DateTime? @map("left_at")
+  activeSeconds Int?      @map("active_seconds")
+
   resultSubmittedAt DateTime? @map("result_submitted_at")
   // When this result actually landed from the trainer app's offline
   // outbox — distinct from resultSubmittedAt so a late/retried sync can

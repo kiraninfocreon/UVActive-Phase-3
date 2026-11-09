@@ -1,7 +1,7 @@
 {
   "name": "uvactive-cloud-api",
   "version": "2.0.0",
-  "description": "UV Active Cloud API — sole system of record for gyms, members, trainers, sessions, transfers and admin oversight. Replaces the hub-mirror model entirely.",
+  "description": "UV Active Cloud API \u2014 sole system of record for gyms, members, trainers, sessions, transfers and admin oversight. Replaces the hub-mirror model entirely.",
   "license": "UNLICENSED",
   "scripts": {
     "build": "nest build",
@@ -14,7 +14,8 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "seed": "ts-node prisma/seed.ts",
-    "test:e2e": "jest --config test/jest-e2e.json --runInBand"
+    "test:e2e": "jest --config test/jest-e2e.json --runInBand",
+    "test:unit": "jest --config test/jest-unit.json"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.699.0",

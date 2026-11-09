@@ -1,4 +1,4 @@
-import { IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNumber, IsOptional, IsString, Length, Max, Min } from 'class-validator';
+import { IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNumber, IsOptional, IsString, Length, Max, Min, MinLength } from 'class-validator';
 import { EmptyToUndefined } from '../common/decorators/empty-to-undefined.decorator';
 
 const SEX_VALUES = ['male', 'female', 'other'] as const;
@@ -84,6 +84,13 @@ export class AdminAssignMemberDto {
 export class ChangePinDto {
   @IsString() @Length(6, 6) currentPin!: string;
   @IsString() @Length(6, 6) newPin!: string;
+}
+
+// Member App Settings → Change password (the email+password web login
+// credential). Distinct from ChangePinDto — a member can have both.
+export class MemberChangePasswordDto {
+  @IsString() currentPassword!: string;
+  @IsString() @MinLength(8) newPassword!: string;
 }
 
 // Shared shape for both the member and trainer push-token endpoints —

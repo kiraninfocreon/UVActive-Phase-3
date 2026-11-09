@@ -64,6 +64,12 @@ export class SessionResultDto {
   @IsOptional() @IsNumber() maxPctMhr?: number;
   @IsOptional() @IsInt() finalRank?: number;
   @IsOptional() @IsNumber() consistencyPct?: number;
+
+  // Participation window — see SessionMember.activeSeconds in the schema.
+  // A late joiner / early leaver is scored over THEIR own active time.
+  @IsOptional() @IsInt() @Min(0) activeSeconds?: number;
+  @EmptyToUndefined() @IsOptional() @IsDateString() joinedAt?: string;
+  @EmptyToUndefined() @IsOptional() @IsDateString() leftAt?: string;
 }
 
 export class EndSessionDto {

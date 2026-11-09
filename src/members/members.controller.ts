@@ -5,7 +5,7 @@ import { Auth, CurrentUser, AuthenticatedUser } from '../common/decorators/auth.
 import { MembersService } from './members.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AdminsService } from '../admins/admins.service';
-import { AdminRegisterMemberDto, RegisterMemberDto, UpdateMemberDto, ReleaseMemberDto, AdminAssignMemberDto, ChangePinDto, AnonymizeMemberDto, MemberSelfUpdateDto, SetPushTokenDto } from './members.dto';
+import { AdminRegisterMemberDto, RegisterMemberDto, UpdateMemberDto, ReleaseMemberDto, AdminAssignMemberDto, ChangePinDto, AnonymizeMemberDto, MemberSelfUpdateDto, SetPushTokenDto, MemberChangePasswordDto } from './members.dto';
 // ── Branch Portal / Trainer App routes — staff realm, scoped to own gym ──
 @ApiTags('branch/members')
 @Controller('branch/members')
@@ -143,6 +143,12 @@ export class MemberSelfController {
   @Post('change-pin')
   changePin(@Body() dto: ChangePinDto, @CurrentUser() user: AuthenticatedUser) {
     return this.members.changeOwnPin(user.sub, dto.currentPin, dto.newPin);
+  }
+
+  // Settings → Change password (email+password credential).
+  @Post('change-password')
+  changePassword(@Body() dto: MemberChangePasswordDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.members.changeOwnPassword(user.sub, dto.currentPassword, dto.newPassword);
   }
 
   // Settings screen "edit details" — bio fields only (see

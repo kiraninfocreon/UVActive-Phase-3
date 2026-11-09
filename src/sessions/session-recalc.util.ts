@@ -29,6 +29,10 @@ export interface RecalcResult {
   maxPctMhr: number | null;
   score: number | null;
   readingCount: number;
+  /** Seconds actually scored for this member (sum of per-reading elapsed, gaps capped) — the member's own active window. */
+  activeSeconds: number | null;
+  /** Readings dropped as physiologically implausible or as isolated spikes. */
+  rejectedCount: number;
 }
 
 // A gap this large means the sensor was off/disconnected between ticks
@@ -85,12 +89,23 @@ export function recalcSessionMember(readings: RecalcReadingInput[], bio: RecalcM
     return {
       avgHr: null, maxHr: null, calories: null, zoneMinutes: null, sweatPoints: null,
       recoveryPoints: null, recoveryGrade: null, epocCalories: null, epocHours: null,
-      avgPctMhr: null, maxPctMhr: null, score: null, readingCount: 0,
+      avgPctMhr: null, maxPctMhr: null, score: null, readingCount: 0, activeSeconds: null, rejectedCount: 0,
     };
   }
 
-  const sorted = [...readings].sort((a, b) => a.ts.getTime() - b.ts.getTime());
   const mhr = estimateMhr(bio.ageYears, bio.sex);
+  const ordered = [...readings].sort((a, b) => a.ts.getTime() - b.ts.getTime());
+  // Strap glitches / isolated spikes must not feed peak HR, zone time or
+  // sweat points — see rejectOutliers().
+  const sorted = rejectOutliers(ordered, mhr);
+  const rejectedCount = ordered.length - sorted.length;
+  if (sorted.length === 0) {
+    return {
+      avgHr: null, maxHr: null, calories: null, zoneMinutes: null, sweatPoints: null,
+      recoveryPoints: null, recoveryGrade: null, epocCalories: null, epocHours: null,
+      avgPctMhr: null, maxPctMhr: null, score: null, readingCount: 0, activeSeconds: null, rejectedCount,
+    };
+  }
 
   const zoneSeconds: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
   let sweatPoints = 0;
@@ -98,6 +113,7 @@ export function recalcSessionMember(readings: RecalcReadingInput[], bio: RecalcM
   let maxHr = 0;
   let maxPctMhr = 0;
   let lastTs: number | null = null;
+  let activeSeconds = 0;
 
   for (const r of sorted) {
     const pctMhr = computePctMhr(r.hr, mhr);
@@ -105,6 +121,7 @@ export function recalcSessionMember(readings: RecalcReadingInput[], bio: RecalcM
 
     const elapsed = lastTs === null ? 1 : Math.max(0, Math.min(MAX_TICK_GAP_SECONDS, Math.round((r.ts.getTime() - lastTs) / 1000)));
     lastTs = r.ts.getTime();
+    activeSeconds += elapsed;
 
     if (zone > 0) zoneSeconds[zone] += elapsed;
     sweatPoints += sweatPointsTick(pctMhr, zone) * elapsed;
@@ -126,7 +143,10 @@ export function recalcSessionMember(readings: RecalcReadingInput[], bio: RecalcM
   // guessed BMI into a member's historical record.
   let calories: number | null = null;
   if (bio.heightCm != null && bio.weightKg != null && bio.ageYears != null) {
-    const durationHours = (sorted[sorted.length - 1].ts.getTime() - sorted[0].ts.getTime()) / 3_600_000;
+    // The member's OWN active time (gaps capped) — NOT last-minus-first
+    // timestamp: a member who left for ten minutes and came back, or who
+    // joined late, must not be credited calories for time they were away.
+    const durationHours = activeSeconds / 3600;
     const gross = grossCaloriesKeytel(avgHr, bio.weightKg, bio.ageYears, bio.sex, durationHours);
     const bmr = harrisBenedictBmr(bio.weightKg, bio.heightCm, bio.ageYears, bio.sex);
     const resting = (bmr / 24) * durationHours;
@@ -169,5 +189,54 @@ export function recalcSessionMember(readings: RecalcReadingInput[], bio: RecalcM
     maxPctMhr: Math.round(maxPctMhr * 10) / 10,
     score,
     readingCount: sorted.length,
+    activeSeconds,
+    rejectedCount,
   };
+}
+
+// ── Plausibility / spike filtering ─────────────────────────────────────
+
+/** A single reading outside this band is a sensor glitch, never a real heart rate. */
+export const MIN_PLAUSIBLE_HR = 30;
+export const MAX_PLAUSIBLE_HR = 240;
+export function isPlausibleHr(hr: number): boolean {
+  return Number.isFinite(hr) && hr >= MIN_PLAUSIBLE_HR && hr <= MAX_PLAUSIBLE_HR;
+}
+
+// A heart rate can legitimately climb ~5 bpm/s at the start of a sprint;
+// anything beyond this base + per-second allowance between two adjacent
+// readings is suspicious.
+const SPIKE_BASE_BPM = 25;
+const SPIKE_PER_SECOND_BPM = 6;
+
+/**
+ * Drops (a) implausible values and (b) ISOLATED spikes — a reading that
+ * jumps away from BOTH its neighbours by more than the allowed rate
+ * while the neighbours agree with each other. A genuine step change
+ * (e.g. HR stays high after a jump) is kept, because the next reading
+ * agrees with it; only the one-off glitch (a strap re-seating, a
+ * dropped-contact packet) is removed. Pure and deterministic, so a
+ * Recalculate always yields the same figures.
+ */
+export function rejectOutliers(sorted: RecalcReadingInput[], mhr: number): RecalcReadingInput[] {
+  const ceiling = Math.min(MAX_PLAUSIBLE_HR, Math.max(mhr * 1.15, 120));
+  const plausible = sorted.filter((r) => isPlausibleHr(r.hr) && r.hr <= ceiling);
+  if (plausible.length < 3) return plausible;
+
+  const allowed = (a: RecalcReadingInput, b: RecalcReadingInput) =>
+    SPIKE_BASE_BPM + SPIKE_PER_SECOND_BPM * Math.max(1, Math.abs(b.ts.getTime() - a.ts.getTime()) / 1000);
+
+  const out: RecalcReadingInput[] = [plausible[0]];
+  for (let i = 1; i < plausible.length - 1; i++) {
+    const prev = out[out.length - 1];
+    const cur = plausible[i];
+    const next = plausible[i + 1];
+    const jumpsFromPrev = Math.abs(cur.hr - prev.hr) > allowed(prev, cur);
+    const jumpsToNext = Math.abs(cur.hr - next.hr) > allowed(cur, next);
+    const neighboursAgree = Math.abs(prev.hr - next.hr) <= allowed(prev, next);
+    if (jumpsFromPrev && jumpsToNext && neighboursAgree) continue; // isolated spike
+    out.push(cur);
+  }
+  out.push(plausible[plausible.length - 1]);
+  return out;
 }

@@ -176,6 +176,15 @@ export class NotificationsService {
     return this.prisma.notification.update({ where: { id }, data: { readAt: new Date() } });
   }
 
+  /** Marks every unread notification for one recipient as read — the Member App's "Mark all read". */
+  async markAllRead(recipientType: string, recipientId: string) {
+    const res = await this.prisma.notification.updateMany({
+      where: { recipientType, recipientId, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return { ok: true, updated: res.count };
+  }
+
   private async deliver(channel: NotificationChannel, recipientAddress: string, title: string | null, body: string, highlight?: string): Promise<void> {
     if (channel === 'push') {
       // The must-deliver channel path (credential delivery etc.) never

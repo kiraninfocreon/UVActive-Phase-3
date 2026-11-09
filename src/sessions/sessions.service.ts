@@ -7,7 +7,7 @@ import { SensorsService } from '../sensors/sensors.service';
 import { AppException } from '../common/exceptions/app.exception';
 import { CreateSessionDto, EndSessionDto } from './sessions.dto';
 import { zoneForBpm } from '../common/hr.util';
-import { recalcSessionMember } from './session-recalc.util';
+import { recalcSessionMember, isPlausibleHr } from './session-recalc.util';
 import { buildChartSeries, ChartSeries } from './chart-downsample.util';
 import { getMemberHistoryTicks } from './member-history-ticks.util';
 import { Prisma } from '@prisma/client';
@@ -546,6 +546,9 @@ export class SessionsService {
             sweatPoints: r.sweatPoints, recoveryPoints: r.recoveryPoints, recoveryGrade,
             epocCalories: r.epocCalories, epocHours: r.epocHours, avgPctMhr: r.avgPctMhr, maxPctMhr: r.maxPctMhr,
             finalRank: r.finalRank, consistencyPct: r.consistencyPct,
+            activeSeconds: r.activeSeconds,
+            joinedAt: r.joinedAt ? new Date(r.joinedAt) : undefined,
+            leftAt: r.leftAt ? new Date(r.leftAt) : undefined,
             resultSubmittedAt: enrolled.resultSubmittedAt ?? new Date(),
             syncedAt: new Date(),
             attendance: enrolled.attendance === 'enrolled' ? 'attended' : enrolled.attendance,
@@ -751,6 +754,15 @@ export class SessionsService {
   async ingestReadings(sessionId: string, readings: { memberId: string; ts: string; hr: number; rrMs?: number; interpolated?: boolean }[], trainerId: string) {
     const session = await this.assertOwnedByTrainer(sessionId, trainerId);
 
+    // Physiologically impossible values (strap off-body glitches, a 0 or
+    // 255 packet) must never reach the log — they poison every recompute,
+    // the graph and the peak-HR figure. The Trainer App already filters
+    // these at source; this is the server-side backstop for older builds.
+    const totalIncoming = readings.length;
+    readings = readings.filter((r) => isPlausibleHr(r.hr));
+    const rejected = totalIncoming - readings.length;
+    if (readings.length === 0) return { ok: true, count: totalIncoming, stored: 0, rejected };
+
     // A reading for a member the cloud doesn't list as enrolled used to be
     // rejected outright — and because the phone retries the identical batch
     // forever, one lost enroll request wedged ALL tick uploads. Store it
@@ -831,7 +843,7 @@ export class SessionsService {
         data: { chartSeries: Prisma.DbNull },
       });
     }
-    return { ok: true, count: readings.length, stored: fresh.length };
+    return { ok: true, count: totalIncoming, stored: fresh.length, rejected };
   }
 
   /**
@@ -895,6 +907,8 @@ export class SessionsService {
         avgPctMhr: pick(result.avgPctMhr, sessionMember.avgPctMhr),
         maxPctMhr: pick(result.maxPctMhr, sessionMember.maxPctMhr),
         score: pick(result.score, sessionMember.score),
+        // Fill the participation window when the phone never sent one.
+        activeSeconds: sessionMember.activeSeconds ?? result.activeSeconds,
         syncedAt: new Date(),
       },
     });

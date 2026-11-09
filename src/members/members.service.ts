@@ -755,6 +755,27 @@ export class MembersService {
    * HR (used for zone/calorie/EPOC math) but can't rename themselves or
    * change the email/phone their account is tied to from the app.
    */
+  /**
+   * Member-initiated password change (the email+password login). A member
+   * created before passwords existed has no passwordHash — they have only
+   * a PIN, so they're told to use Change PIN instead of being handed a
+   * way to set a password without proving anything.
+   */
+  async changeOwnPassword(memberId: string, currentPassword: string, newPassword: string) {
+    const member = await this.prisma.member.findUnique({ where: { id: memberId } });
+    if (!member || member.isAnonymized) throw new NotFoundException('Member not found.');
+    if (!member.passwordHash) {
+      throw new BadRequestException('No password is set on this account — sign in with your Member ID and PIN, or ask your gym to issue one.');
+    }
+    const ok = await verifySecret(member.passwordHash, currentPassword);
+    if (!ok) throw new ForbiddenException('Current password is incorrect.');
+    if (currentPassword === newPassword) throw new BadRequestException('New password must be different from the current one.');
+    const passwordHash = await hashSecret(newPassword);
+    await this.prisma.member.update({ where: { id: memberId }, data: { passwordHash } });
+    await this.auditLog.record({ actorType: 'member', actorId: memberId, action: 'member.password_change', targetType: 'member', targetId: memberId });
+    return { ok: true };
+  }
+
   async updateOwnBio(memberId: string, dto: MemberSelfUpdateDto) {
     const member = await this.prisma.member.findUnique({ where: { id: memberId } });
     if (!member) throw new NotFoundException('Member not found.');

@@ -1,9 +1,10 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, useWindowDimensions } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, useWindowDimensions, Alert } from 'react-native';
+import { useEffect } from 'react';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { Dumbbell, Plus, ChevronRight, Radio, Play, History as HistoryIcon, CalendarClock } from 'lucide-react-native';
-import { colors, fonts, radius, spacing } from '../theme/tokens';
+import { colors, fonts, radius, spacing, type } from '../theme/tokens';
 import type { RootStackParamList } from '../navigation/RootNavigator';
 import { sessionsApi, type RemoteSession } from '../services/sessionsApi';
 import { ApiError } from '../services/api';
@@ -12,6 +13,8 @@ import { sessionEngine } from '../services/sessionEngine';
 import { useResponsiveLayout } from '../lib/responsive';
 import { EmptyState } from '../components/EmptyState';
 import { Screen } from '../components/Screen';
+import { Glass } from '../components/uv/Glass';
+import { UnderlineTabs, PillButton } from '../components/uv/Ui';
 
 export type SessionDisplay = {
   id: string;
@@ -107,6 +110,21 @@ function sortKey(s: SessionDisplay): number {
 
 type InnerTab = 'scheduled' | 'history';
 
+/** A scheduled session can be started once its time has arrived (unscheduled ones any time). */
+function canStart(s: SessionDisplay, now: number): boolean {
+  if (!s.scheduledAt) return true;
+  return new Date(s.scheduledAt).getTime() <= now;
+}
+
+function startsIn(s: SessionDisplay, now: number): string {
+  if (!s.scheduledAt) return 'now';
+  const mins = Math.ceil((new Date(s.scheduledAt).getTime() - now) / 60000);
+  if (mins <= 0) return 'now';
+  if (mins < 60) return `in ${mins} min`;
+  if (mins < 24 * 60) return `in ${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `in ${Math.floor(mins / 1440)}d`;
+}
+
 export function SessionsScreen() {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
   const { width } = useWindowDimensions();
@@ -124,6 +142,10 @@ export function SessionsScreen() {
   // bottom-tab, plus gives Scheduled a clearly-labelled place to start a
   // new booking.
   const [innerTab, setInnerTab] = useState<InnerTab>('scheduled');
+  // Re-render every 20s so "Starts in 12 min" counts down and the Start
+  // button unlocks the moment a scheduled session's time arrives.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 20000); return () => clearInterval(t); }, []);
 
   const load = useCallback(async () => {
     setError(null);
@@ -187,6 +209,10 @@ export function SessionsScreen() {
   //   past       → full details/leaderboard view.
   const handleRowPress = (s: SessionDisplay) => {
     if (s.status === 'scheduled') {
+      if (!canStart(s, now)) {
+        Alert.alert('Not time yet', `"${s.name}" can be started when its scheduled time arrives (${startsIn(s, now)}).`);
+        return;
+      }
       navigation.navigate('SessionSetup', { mode: 'start-scheduled', sessionId: s.id, sessionName: s.name });
     } else if (s.status === 'in_progress') {
       if (sessionEngine.isActive && sessionEngine.currentSessionId === s.id) {
@@ -206,7 +232,7 @@ export function SessionsScreen() {
         <Text style={styles.sectionTitle}>{title} · {items.length}</Text>
         <View style={[styles.grid, columns === 2 && styles.grid2]}>
           {items.map((s) => (
-            <SessionRow key={s.id} session={s} width={rowWidth} onPress={() => handleRowPress(s)} />
+            <SessionRow key={s.id} session={s} now={now} width={rowWidth} onPress={() => handleRowPress(s)} />
           ))}
         </View>
       </View>
@@ -226,34 +252,15 @@ export function SessionsScreen() {
         </View>
       </View>
 
-      {/* Scheduled / History sub-tabs */}
       <View style={styles.tabRow}>
-        <TouchableOpacity
-          style={[styles.tabBtn, innerTab === 'scheduled' && styles.tabBtnActive]}
-          onPress={() => setInnerTab('scheduled')}
-          activeOpacity={0.8}
-        >
-          <CalendarClock size={14} color={innerTab === 'scheduled' ? colors.primary : colors.mutedForeground} />
-          <Text style={[styles.tabBtnText, innerTab === 'scheduled' && styles.tabBtnTextActive]}>Scheduled</Text>
-          {scheduledCount > 0 && (
-            <View style={[styles.tabBadge, innerTab === 'scheduled' && styles.tabBadgeActive]}>
-              <Text style={[styles.tabBadgeText, innerTab === 'scheduled' && styles.tabBadgeTextActive]}>{scheduledCount}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tabBtn, innerTab === 'history' && styles.tabBtnActive]}
-          onPress={() => setInnerTab('history')}
-          activeOpacity={0.8}
-        >
-          <HistoryIcon size={14} color={innerTab === 'history' ? colors.primary : colors.mutedForeground} />
-          <Text style={[styles.tabBtnText, innerTab === 'history' && styles.tabBtnTextActive]}>History</Text>
-          {historyCount > 0 && (
-            <View style={[styles.tabBadge, innerTab === 'history' && styles.tabBadgeActive]}>
-              <Text style={[styles.tabBadgeText, innerTab === 'history' && styles.tabBadgeTextActive]}>{historyCount}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
+        <UnderlineTabs
+          value={innerTab}
+          onChange={setInnerTab}
+          tabs={[
+            { key: 'scheduled', label: 'Scheduled', badge: scheduledCount || undefined },
+            { key: 'history', label: 'History', badge: historyCount || undefined },
+          ]}
+        />
       </View>
 
       {/* Schedule-a-session action lives on the Scheduled tab — that's
@@ -261,14 +268,7 @@ export function SessionsScreen() {
           list it fills stay together instead of a global header button
           that's equally reachable (and equally confusing) from History. */}
       {innerTab === 'scheduled' && (
-        <TouchableOpacity
-          style={styles.newButton}
-          onPress={() => navigation.navigate('SessionSetup', { mode: 'schedule' })}
-          activeOpacity={0.85}
-        >
-          <Plus size={16} color={colors.primaryForeground} />
-          <Text style={styles.newButtonText}>Schedule Session</Text>
-        </TouchableOpacity>
+        <PillButton label="Schedule session" icon={<Plus size={15} color={colors.primaryForeground} />} onPress={() => navigation.navigate('SessionSetup', { mode: 'schedule' })} style={{ marginHorizontal: spacing.xl, marginBottom: spacing.lg }} />
       )}
 
       {error ? (
@@ -342,7 +342,7 @@ function formatWhen(s: SessionDisplay): string {
   return `${date} · ${time}`;
 }
 
-function SessionRow({ session, width, onPress }: { session: SessionDisplay; width?: number; onPress: () => void }) {
+function SessionRow({ session, now, width, onPress }: { session: SessionDisplay; now: number; width?: number; onPress: () => void }) {
   const color = STATUS_COLOR[session.status] ?? colors.mutedForeground;
   const isInProgress = session.status === 'in_progress';
   const isScheduled = session.status === 'scheduled';
@@ -370,10 +370,16 @@ function SessionRow({ session, width, onPress }: { session: SessionDisplay; widt
           {!isScheduled && session.durationSeconds ? <Text style={styles.rowDuration}>{Math.round(session.durationSeconds / 60)} min</Text> : null}
           <Text style={styles.rowMembers}>{session.memberCount}/{session.capacity || '∞'} members</Text>
           {isScheduled ? (
-            <View style={styles.startPill}>
-              <Play size={11} color={colors.primaryForeground} />
-              <Text style={styles.startPillText}>Start</Text>
-            </View>
+            canStart(session, now) ? (
+              <View style={styles.startPill}>
+                <Play size={11} color={colors.primaryForeground} />
+                <Text style={styles.startPillText}>Start</Text>
+              </View>
+            ) : (
+              <View style={styles.lockedPill}>
+                <Text style={styles.lockedPillText}>Starts {startsIn(session, now)}</Text>
+              </View>
+            )
           ) : isInProgress ? (
             <View style={styles.resumePill}>
               <Play size={11} color={colors.primary} />
@@ -392,9 +398,9 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.md,
+    paddingHorizontal: spacing.xl, paddingTop: spacing.lg, paddingBottom: spacing.md,
   },
-  heading: { fontFamily: fonts.heading, fontSize: 24, color: colors.foreground },
+  heading: { fontFamily: fonts.heading, fontSize: 30, letterSpacing: -0.5, color: colors.foreground },
   subheading: { fontFamily: fonts.body, fontSize: 12, color: colors.mutedForeground, marginTop: 2 },
   newButton: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs,
@@ -403,7 +409,7 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.lg, marginBottom: spacing.md,
   },
   newButtonText: { fontFamily: fonts.bodySemiBold, fontSize: 13, color: colors.primaryForeground },
-  tabRow: { flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.lg, marginBottom: spacing.sm },
+  tabRow: { paddingHorizontal: spacing.xl, marginTop: spacing.sm },
   tabBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: 8,
     borderRadius: radius.full, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border,
@@ -422,14 +428,14 @@ const styles = StyleSheet.create({
   errorText: { fontFamily: fonts.body, fontSize: 12, color: colors.warning },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: spacing.xxl },
   loadingText: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground },
-  listContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
+  listContent: { paddingHorizontal: spacing.xl, paddingBottom: 130 },
   section: { marginTop: spacing.lg },
-  sectionTitle: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.foreground, marginBottom: spacing.sm },
+  sectionTitle: { ...type.sectionTitle, marginBottom: spacing.sm },
   grid: { gap: spacing.sm },
   grid2: { flexDirection: 'row', flexWrap: 'wrap' },
   row: {
-    flexDirection: 'row', backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border,
-    borderRadius: radius.lg, overflow: 'hidden', marginBottom: spacing.sm,
+    flexDirection: 'row', backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassBorder,
+    borderRadius: radius.xl, overflow: 'hidden', marginBottom: spacing.sm,
   },
   statusStripe: { width: 4 },
   rowBody: { flex: 1, padding: spacing.md, minWidth: 0 },
@@ -445,6 +451,8 @@ const styles = StyleSheet.create({
   rowMembers: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground, flex: 1 },
   rowChevron: {},
   startPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.primary, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4 },
+  lockedPill: { backgroundColor: colors.glassStrong, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4 },
+  lockedPillText: { fontFamily: fonts.metric, fontSize: 10, color: colors.mutedForeground },
   startPillText: { fontFamily: fonts.bodySemiBold, fontSize: 10, color: colors.primaryForeground },
   resumePill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.primary + '22', borderWidth: 1, borderColor: colors.primary + '55', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 3 },
   resumePillText: { fontFamily: fonts.bodySemiBold, fontSize: 10, color: colors.primary },

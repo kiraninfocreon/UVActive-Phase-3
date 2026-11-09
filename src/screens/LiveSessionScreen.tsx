@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, ScrollView, useWindowDimensions, Modal, TouchableOpacity, Alert, BackHandler, ActivityIndicator, TextInput } from 'react-native';
+import { View, Text, StyleSheet, FlatList, ScrollView, useWindowDimensions, Modal, TouchableOpacity, Alert, BackHandler, ActivityIndicator, TextInput, Linking, Platform } from 'react-native';
+import * as ScreenOrientation from 'expo-screen-orientation';
+import { useKeepAwake } from 'expo-keep-awake';
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
-import { X, Plus, Radio, UserX, Search } from 'lucide-react-native';
+import { X, Plus, Radio, UserX, Search, Cast, LogOut } from 'lucide-react-native';
 import { colors, fonts, radius, spacing } from '../theme/tokens';
 import type { RootStackParamList } from '../navigation/RootNavigator';
 import { sessionEngine } from '../services/sessionEngine';
@@ -15,6 +17,8 @@ import { ConnectionStatus } from '../components/ConnectionStatus';
 import { getTicksForMember, getSessionMembers } from '../db/database';
 import { ZoneDistributionBar, ZoneTimeBreakdown, zoneSecondsToBuckets } from '../components/ZoneDistribution';
 import { Screen } from '../components/Screen';
+import { Glass } from '../components/uv/Glass';
+import { PillButton } from '../components/uv/Ui';
 import { membersApi, type RemoteMember } from '../services/sessionsApi';
 import { startNearbyScan, registerNearbyDevice, type NearbyBLEDevice } from '../services/ble';
 import { assignSensorToMember, addRegisteredSensor } from '../services/sensorRegistry';
@@ -37,10 +41,30 @@ export function LiveSessionScreen() {
   const [assignMemberId, setAssignMemberId] = useState<string | null>(null); // dead-block tap → assign/absent sheet
   const [showLateJoin, setShowLateJoin] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  // End-session overlay state — shows a calculating animation while
-  // sessionEngine.endSession() finalizes every member's results.
-  const [ending, setEnding] = useState(false);
-  const [endProgress, setEndProgress] = useState({ current: 0, total: 0, memberName: '' });
+  const [castHelp, setCastHelp] = useState(false); // instruction overlay
+  const [tvMode, setTvMode] = useState(false); // full-screen landscape grid
+  useKeepAwake();
+
+  // Cast to TV: rotate to landscape, show how to mirror the screen, then
+  // present a no-scroll grid sized to fit every athlete. Always restore
+  // portrait when leaving TV mode or the screen unmounts.
+  const startCast = useCallback(async () => {
+    try { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE); } catch { /* best-effort */ }
+    setCastHelp(true);
+  }, []);
+  const stopCast = useCallback(async () => {
+    setCastHelp(false);
+    setTvMode(false);
+    try { await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP); } catch { /* best-effort */ }
+  }, []);
+  useEffect(() => () => { ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {}); }, []);
+  const openCastSettings = useCallback(() => {
+    if (Platform.OS === 'android') {
+      Linking.sendIntent('android.settings.CAST_SETTINGS').catch(() => Linking.openSettings().catch(() => {}));
+    } else {
+      Linking.openSettings().catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     const unsub = sessionEngine.addLiveListener(setTicks);
@@ -62,13 +86,9 @@ export function LiveSessionScreen() {
         style: 'destructive',
         onPress: async () => {
           try {
-            setEnding(true);
-            await sessionEngine.endSession((current, total, memberName) => {
-              setEndProgress({ current, total, memberName });
-            });
+            await sessionEngine.endSession();
             navigation.replace('SessionSummary', { sessionId: route.params.sessionId });
           } catch (e) {
-            setEnding(false);
             Alert.alert('Could not end session', e instanceof Error ? e.message : 'Try again.');
           }
         },
@@ -98,27 +118,27 @@ export function LiveSessionScreen() {
   const columns = Math.max(2, Math.floor(width / (MIN_TILE_WIDTH + TILE_GAP)));
   const tileWidth = (width - spacing.lg * 2 - TILE_GAP * (columns - 1)) / columns;
 
-  // Live tiles ranked by score; members without a tick yet render as
-  // waiting placeholders (or, if they have no sensor at all, as tappable
-  // "dead blocks") at the end so the trainer sees the full roster.
+  // Tiles are driven by the roster so status (active / away / left) is
+  // always right. Ranked: scoring members by points, then members still
+  // waiting for a signal, then away, then left (greyed at the bottom).
   const displayList = useMemo(() => {
-    const live = [...ticks.values()].sort((a, b) => b.sweatPointsSoFar - a.sweatPointsSoFar);
-    const waiting = roster.filter((m) => !ticks.has(m.memberId));
-    const waitingTiles: TileData[] = waiting.map((m) => ({
-      memberId: m.memberId,
-      memberName: m.memberName,
-      currentBPM: 0,
-      pctMHR: 0,
-      currentZone: 0,
-      zoneColour: colors.muted,
-      sweatPointsSoFar: 0,
-      timeInCurrentZone: 0,
-      isPersonalBest: false,
-      isDropped: true,
-      rank: 0,
-      needsSensor: !m.sensorDeviceId,
-    }));
-    return { live, waitingTiles };
+    const entries = roster.map((m) => {
+      const t = ticks.get(m.memberId);
+      const base: TileData = t
+        ? { ...t }
+        : {
+            memberId: m.memberId, memberName: m.memberName, currentBPM: 0, pctMHR: 0, currentZone: 0, zoneColour: colors.muted,
+            sweatPointsSoFar: 0, timeInCurrentZone: 0, isPersonalBest: false, isDropped: true, rank: 0,
+          };
+      base.sex = base.sex ?? m.sex;
+      base.memberStatus = m.status;
+      base.needsSensor = m.status !== 'left' && !m.sensorDeviceId;
+      return { tile: base, hasTick: !!t };
+    });
+    const group = (e: { tile: TileData; hasTick: boolean }) =>
+      e.tile.memberStatus === 'left' ? 3 : e.tile.memberStatus === 'away' ? 2 : e.hasTick && !e.tile.needsSensor ? 0 : 1;
+    entries.sort((a, b) => group(a) - group(b) || b.tile.sweatPointsSoFar - a.tile.sweatPointsSoFar);
+    return { tiles: entries.map((e) => e.tile), liveCount: entries.filter((e) => group(e) === 0).length };
   }, [ticks, roster]);
 
   const onCountdownDone = useCallback(() => {
@@ -139,14 +159,14 @@ export function LiveSessionScreen() {
 
   const onTilePress = (memberId: string) => {
     const rosterEntry = roster.find((m) => m.memberId === memberId);
-    if (rosterEntry && !rosterEntry.sensorDeviceId) {
+    if (rosterEntry && rosterEntry.status !== 'left' && !rosterEntry.sensorDeviceId) {
       setAssignMemberId(memberId); // dead block — open assign/absent sheet, not the stats modal
     } else {
       setSelectedMemberId(memberId);
     }
   };
 
-  const allTiles: TileData[] = [...displayList.live, ...displayList.waitingTiles];
+  const allTiles: TileData[] = displayList.tiles;
   const assignTarget = assignMemberId ? roster.find((m) => m.memberId === assignMemberId) : null;
 
   return (
@@ -158,10 +178,13 @@ export function LiveSessionScreen() {
         <View>
           <Text style={styles.timer}>{formatElapsed(elapsedSeconds)}</Text>
           <Text style={styles.athleteCount}>
-            {displayList.live.length}/{roster.length} connected{isPaused ? ' · paused' : breakActive ? ' · break' : ''}
+            {displayList.liveCount}/{roster.length} connected{isPaused ? ' · paused' : breakActive ? ' · break' : ''}
           </Text>
         </View>
         <View style={styles.headerRight}>
+          <TouchableOpacity style={styles.castButton} onPress={startCast} hitSlop={8} accessibilityLabel="Cast to TV">
+            <Cast size={16} color={colors.foreground} />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.lateJoinButton} onPress={() => setShowLateJoin(true)} hitSlop={8}>
             <Plus size={18} color={colors.primaryForeground} />
           </TouchableOpacity>
@@ -182,7 +205,7 @@ export function LiveSessionScreen() {
             rank={index + 1}
             tileWidth={tileWidth}
             onPress={onTilePress}
-            preSession={item.isDropped && item.currentBPM === 0}
+            preSession={item.isDropped && item.currentBPM === 0 && item.memberStatus === 'active' && !item.needsSensor}
             needsSensor={item.needsSensor}
           />
         )}
@@ -205,24 +228,28 @@ export function LiveSessionScreen() {
       />
 
       {selectedMemberId && (
-        <AthleteDetailModal sessionId={route.params.sessionId} memberId={selectedMemberId} tick={ticks.get(selectedMemberId) ?? null} onClose={() => setSelectedMemberId(null)} />
+        <AthleteDetailModal
+          sessionId={route.params.sessionId}
+          memberId={selectedMemberId}
+          tick={ticks.get(selectedMemberId) ?? null}
+          status={roster.find((m) => m.memberId === selectedMemberId)?.status ?? 'active'}
+          onClose={() => setSelectedMemberId(null)}
+          onRejoin={() => { const id = selectedMemberId; setSelectedMemberId(null); setAssignMemberId(id); }}
+        />
       )}
 
       {assignTarget && (
         <AssignSensorSheet
+          rejoin={assignTarget.status === 'left'}
           memberId={assignTarget.memberId}
           memberName={assignTarget.memberName}
-          // Exclude sensors already assigned to a DIFFERENT member in
-          // this session — same protection the pre-session setup
-          // screen already has. Without this, a still-broadcasting
-          // device shows up in a fresh scan even though it's already
-          // in use, and a mis-tap silently steals it (sessionEngine's
-          // assignSensor() now handles that case if it happens, but
-          // filtering it out of the list here stops the mistake before
-          // it's made).
-          assignedElsewhere={new Set(roster.filter((m) => m.sensorDeviceId && m.memberId !== assignTarget.memberId).map((m) => m.sensorDeviceId!))}
           onClose={() => setAssignMemberId(null)}
         />
+      )}
+
+      {castHelp && <CastHelpOverlay onClose={stopCast} onOpenSettings={openCastSettings} onReady={() => { setCastHelp(false); setTvMode(true); }} />}
+      {tvMode && (
+        <TvGrid tiles={allTiles} elapsed={formatElapsed(elapsedSeconds)} liveCount={displayList.liveCount} total={roster.length} paused={isPaused || breakActive} onExit={stopCast} />
       )}
 
       {showLateJoin && (
@@ -230,32 +257,6 @@ export function LiveSessionScreen() {
           existingMemberIds={new Set(roster.map((m) => m.memberId))}
           onClose={() => setShowLateJoin(false)}
         />
-      )}
-
-      {/* End-session calculating overlay — shows while sessionEngine.endSession() */}
-      {/* finalizes every member's results (UV score, sweat/recovery/EPOC, zones). */}
-      {ending && (
-        <View style={styles.endOverlay}>
-          <View style={styles.endOverlayCard}>
-            <Text style={styles.endOverlayEmoji}>🏆</Text>
-            <Text style={styles.endOverlayTitle}>Finalizing Results</Text>
-            <Text style={styles.endOverlaySubtitle}>
-              {endProgress.total > 0
-                ? `Calculating ${endProgress.memberName}… (${endProgress.current}/${endProgress.total})`
-                : 'Preparing session results…'}
-            </Text>
-            {/* Progress bar */}
-            {endProgress.total > 0 && (
-              <View style={styles.endProgressTrack}>
-                <View
-                  style={[styles.endProgressFill, { width: `${(endProgress.current / endProgress.total) * 100}%` }]}
-                />
-              </View>
-            )}
-            <ActivityIndicator color={colors.primary} size="large" style={{ marginTop: spacing.lg }} />
-            <Text style={styles.endOverlayNote}>Hang tight — results are worth the wait!</Text>
-          </View>
-        </View>
       )}
     </View>
     </Screen>
@@ -268,7 +269,7 @@ function formatElapsed(totalSeconds: number): string {
   return `${m}:${s}`;
 }
 
-function AthleteDetailModal({ sessionId, memberId, tick, onClose }: { sessionId: string; memberId: string; tick: LiveTick | null; onClose: () => void }) {
+function AthleteDetailModal({ sessionId, memberId, tick, status, onClose, onRejoin }: { sessionId: string; memberId: string; tick: LiveTick | null; status: 'active' | 'away' | 'left'; onClose: () => void; onRejoin: () => void }) {
   const [points, setPoints] = useState<GraphPoint[]>([]);
   const [zoneSeconds, setZoneSeconds] = useState<number[] | Record<string, number> | null>(null);
   const [memberStats, setMemberStats] = useState<{ avgHr: number | null; peakHr: number | null; calories: number | null } | null>(null);
@@ -329,6 +330,23 @@ function AthleteDetailModal({ sessionId, memberId, tick, onClose }: { sessionId:
             </View>
           )}
 
+          {status === 'left' ? (
+            <PillButton label="Rejoin with a sensor" onPress={onRejoin} style={{ marginBottom: spacing.md }} />
+          ) : (
+            <PillButton
+              variant="danger"
+              label="Member left the session"
+              icon={<LogOut size={15} color={colors.destructive} />}
+              style={{ marginBottom: spacing.md }}
+              onPress={() =>
+                Alert.alert('Member left?', 'Their result is kept and scoring stops. The strap is released so it can\'t add spikes. You can rejoin them later.', [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Mark as left', style: 'destructive', onPress: () => { sessionEngine.markLeft(memberId).catch(() => {}); onClose(); } },
+                ])
+              }
+            />
+          )}
+
           <BpmLineGraph points={points} height={160} emptyLabel={tick && tick.currentBPM === 0 ? 'Waiting for readings…' : 'No readings recorded yet.'} />
 
           {/* Zone distribution bar + breakdown */}
@@ -360,17 +378,7 @@ function ModalStat({ label, value }: { label: string; value: string }) {
  * scan for nearby BLE sensors, tap one to assign, or mark the member
  * absent to pull their block off the grid entirely.
  */
-function AssignSensorSheet({
-  memberId,
-  memberName,
-  assignedElsewhere,
-  onClose,
-}: {
-  memberId: string;
-  memberName: string;
-  assignedElsewhere: Set<string>;
-  onClose: () => void;
-}) {
+function AssignSensorSheet({ memberId, memberName, onClose, rejoin = false }: { memberId: string; memberName: string; onClose: () => void; rejoin?: boolean }) {
   const [nearby, setNearby] = useState<NearbyBLEDevice[]>([]);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -383,28 +391,14 @@ function AssignSensorSheet({
     return () => stop?.();
   }, []);
 
-  // Same protection the pre-session setup screen has: don't offer a
-  // sensor that's already in use by someone else in this session.
-  const selectable = nearby.filter((d) => !assignedElsewhere.has(d.id));
-
   const assign = async (device: NearbyBLEDevice) => {
     setConnecting(device.id);
     try {
       const deviceId = await registerNearbyDevice(device);
-      const bumped = sessionEngine.assignSensor(memberId, deviceId);
+      sessionEngine.assignSensor(memberId, deviceId);
       assignSensorToMember(memberId, deviceId).catch(() => {});
       addRegisteredSensor(deviceId).catch(() => {});
       onClose();
-      // That sensor was already assigned to someone else in this
-      // session — their tile is now a dead block again (correctly, no
-      // stale "connected" state left over) but the trainer needs to
-      // know to go re-assign them a different sensor.
-      if (bumped) {
-        Alert.alert(
-          'Sensor reassigned',
-          `${device.name} was already assigned to ${bumped.bumpedMemberName} — they're now unassigned. Tap their tile to give them a different sensor.`,
-        );
-      }
     } catch {
       Alert.alert('Could not connect', `Failed to connect to ${device.name}. Try again.`);
     } finally {
@@ -431,26 +425,24 @@ function AssignSensorSheet({
       <View style={styles.modalBackdrop}>
         <View style={styles.modalCard}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>{memberName}</Text>
+            <Text style={styles.modalTitle}>{rejoin ? `Rejoin · ${memberName}` : memberName}</Text>
             <TouchableOpacity onPress={onClose} hitSlop={10}>
               <X size={22} color={colors.mutedForeground} />
             </TouchableOpacity>
           </View>
 
-          <Text style={styles.sheetNote}>Tap a nearby sensor to assign it, or mark them absent to remove their block.</Text>
+          <Text style={styles.sheetNote}>{rejoin ? 'Pick a nearby sensor to bring them back. Scoring resumes from now; time away is not counted.' : 'Tap a nearby sensor to assign it, or mark them absent to remove their block.'}</Text>
 
           {scanError && <Text style={styles.sheetError}>{scanError}</Text>}
-          {!scanError && selectable.length === 0 && (
+          {!scanError && nearby.length === 0 && (
             <View style={styles.sheetEmptyWrap}>
               <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={styles.sheetEmpty}>
-                {nearby.length > 0 ? 'All nearby sensors are already assigned in this session.' : 'Scanning for nearby Polar sensors…'}
-              </Text>
+              <Text style={styles.sheetEmpty}>Scanning for nearby Polar sensors…</Text>
             </View>
           )}
 
           <FlatList
-            data={selectable}
+            data={nearby}
             keyExtractor={(d) => d.id}
             style={{ maxHeight: 220 }}
             renderItem={({ item }) => (
@@ -462,10 +454,12 @@ function AssignSensorSheet({
             )}
           />
 
-          <TouchableOpacity style={styles.absentButton} onPress={markAbsent}>
-            <UserX size={16} color={colors.destructive} />
-            <Text style={styles.absentButtonText}>Mark Absent</Text>
-          </TouchableOpacity>
+          {!rejoin && (
+            <TouchableOpacity style={styles.absentButton} onPress={markAbsent}>
+              <UserX size={16} color={colors.destructive} />
+              <Text style={styles.absentButtonText}>Mark Absent</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
     </Modal>
@@ -553,7 +547,96 @@ function LateJoinSheet({ existingMemberIds, onClose }: { existingMemberIds: Set<
   );
 }
 
+/** Step 1 of casting: landscape is already locked; tell the trainer how to mirror. */
+function CastHelpOverlay({ onClose, onOpenSettings, onReady }: { onClose: () => void; onOpenSettings: () => void; onReady: () => void }) {
+  const steps = Platform.OS === 'ios'
+    ? ['Swipe down from the top-right corner to open Control Center.', 'Tap Screen Mirroring and pick your TV or Apple TV.', 'Come back here and tap "Show on TV".']
+    : ['Make sure the phone and the TV (or Chromecast) are on the same Wi-Fi.', 'Tap "Open cast settings" and choose your TV from the list.', 'Come back here and tap "Show on TV".'];
+  return (
+    <View style={styles.castBackdrop}>
+      <Glass tone="strong" style={styles.castCard}>
+        <Text style={styles.castTitle}>Cast to TV</Text>
+        <Text style={styles.castSub}>Your screen is now landscape. Mirror it to a TV so members can see their zones.</Text>
+        {steps.map((t, i) => (
+          <View key={i} style={styles.castStep}>
+            <View style={styles.castNum}><Text style={styles.castNumText}>{i + 1}</Text></View>
+            <Text style={styles.castStepText}>{t}</Text>
+          </View>
+        ))}
+        <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md, flexWrap: 'wrap' }}>
+          <PillButton variant="glass" label={Platform.OS === 'android' ? 'Open cast settings' : 'Open settings'} onPress={onOpenSettings} />
+          <PillButton label="Show on TV" onPress={onReady} />
+          <PillButton variant="glass" label="Cancel" onPress={onClose} />
+        </View>
+      </Glass>
+    </View>
+  );
+}
+
+const ZONE_LEGEND: { z: 0 | 1 | 2 | 3 | 4 | 5; n: string }[] = [
+  { z: 0, n: 'Standby' }, { z: 1, n: 'Recovery' }, { z: 2, n: 'Aerobic' }, { z: 3, n: 'Fitness' }, { z: 4, n: 'Burn' }, { z: 5, n: 'Peak' },
+];
+
+/** Full-screen landscape grid for the TV: every tile fits, no scrolling. */
+function TvGrid({ tiles, elapsed, liveCount, total, paused, onExit }: { tiles: TileData[]; elapsed: string; liveCount: number; total: number; paused: boolean; onExit: () => void }) {
+  const { width, height } = useWindowDimensions();
+  const GAP = 6;
+  const HEADER = 44;
+  const FOOTER = 26;
+  const n = Math.max(1, tiles.length);
+  const availW = width - GAP * 2;
+  const availH = height - HEADER - FOOTER - GAP * 2;
+  // pick the column count that gives the largest tile area
+  let best = { cols: 1, w: 0, h: 0, area: 0 };
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const w = (availW - GAP * (cols - 1)) / cols;
+    const h = (availH - GAP * (rows - 1)) / rows;
+    const area = Math.min(w, h * 1.6) * Math.min(h, w / 1.1);
+    if (area > best.area) best = { cols, w, h, area };
+  }
+  return (
+    <Modal animationType="fade" supportedOrientations={['landscape', 'landscape-left', 'landscape-right']} onRequestClose={onExit}>
+      <View style={{ flex: 1, backgroundColor: '#000', padding: GAP }}>
+        <View style={{ height: HEADER, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6 }}>
+          <Text style={styles.tvTimer}>{elapsed}{paused ? '  · PAUSED' : ''}</Text>
+          <Text style={styles.tvCount}>{liveCount}/{total} connected</Text>
+          <TouchableOpacity onPress={onExit} hitSlop={10} style={styles.tvExit}><X size={16} color="#fff" /><Text style={styles.tvExitText}>Exit TV</Text></TouchableOpacity>
+        </View>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: GAP, flex: 1, alignContent: 'flex-start' }}>
+          {tiles.map((t, i) => (
+            <AthleteTile key={t.memberId} tick={t} rank={i + 1} tileWidth={best.w} tileHeight={best.h} tv onPress={() => {}}
+              preSession={t.isDropped && t.currentBPM === 0 && t.memberStatus === 'active' && !t.needsSensor} needsSensor={t.needsSensor} />
+          ))}
+        </View>
+        <View style={{ height: FOOTER, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14 }}>
+          {ZONE_LEGEND.map((l) => (
+            <View key={l.z} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+              <View style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: colors.zone[l.z] }} />
+              <Text style={styles.tvLegend}>{l.n}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
+  castButton: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.glassStrong, borderWidth: 1, borderColor: colors.glassBorder, alignItems: 'center', justifyContent: 'center' },
+  castBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.72)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+  castCard: { padding: spacing.xl, maxWidth: 560, width: '100%' },
+  castTitle: { fontFamily: fonts.heading, fontSize: 22, color: colors.foreground },
+  castSub: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground, marginTop: 6, marginBottom: spacing.md },
+  castStep: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md, marginTop: spacing.sm },
+  castNum: { width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(251,80,97,0.18)', alignItems: 'center', justifyContent: 'center' },
+  castNumText: { fontFamily: fonts.metricBold, fontSize: 11, color: colors.primary },
+  castStepText: { flex: 1, fontFamily: fonts.body, fontSize: 13, color: colors.foreground, lineHeight: 19 },
+  tvTimer: { fontFamily: fonts.metricBold, fontSize: 22, color: '#fff' },
+  tvCount: { fontFamily: fonts.metric, fontSize: 13, color: 'rgba(255,255,255,0.6)' },
+  tvExit: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 5 },
+  tvExitText: { fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#fff' },
+  tvLegend: { fontFamily: fonts.bodyMedium, fontSize: 10, color: 'rgba(255,255,255,0.65)' },
   root: { flex: 1, backgroundColor: colors.background },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.lg, paddingBottom: spacing.sm },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
@@ -590,28 +673,4 @@ const styles = StyleSheet.create({
     borderRadius: radius.md, paddingHorizontal: spacing.md, marginBottom: spacing.md,
   },
   searchInput: { flex: 1, paddingVertical: spacing.sm, fontFamily: fonts.body, fontSize: 14, color: colors.foreground },
-  // End-session calculating overlay
-  endOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 999,
-  },
-  endOverlayCard: {
-    backgroundColor: colors.card,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.xl,
-    alignItems: 'center',
-    width: '80%',
-    maxWidth: 320,
-  },
-  endOverlayEmoji: { fontSize: 48, marginBottom: spacing.md },
-  endOverlayTitle: { fontFamily: fonts.heading, fontSize: 20, color: colors.foreground, marginBottom: spacing.xs },
-  endOverlaySubtitle: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground, textAlign: 'center', marginBottom: spacing.md },
-  endProgressTrack: { height: 6, borderRadius: 3, backgroundColor: colors.muted, width: '100%', overflow: 'hidden' },
-  endProgressFill: { height: '100%', borderRadius: 3, backgroundColor: colors.primary },
-  endOverlayNote: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground, marginTop: spacing.md, textAlign: 'center' },
 });

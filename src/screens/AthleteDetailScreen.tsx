@@ -60,7 +60,7 @@ export function AthleteDetailScreen() {
           // feed those straight into the HR curve so the zone-colour
           // toggle has something to show without a session drill-down.
           if (!sessionId && p.hrTicks?.length) {
-            setBpmPoints(p.hrTicks.slice().reverse().map((t) => ({ value: t.bpm, ts: t.ts })));
+            setBpmPoints(p.hrTicks.slice().reverse().map((t) => ({ value: t.bpm })));
           }
         }
       } catch {
@@ -83,15 +83,16 @@ export function AthleteDetailScreen() {
           setRank(sorted.findIndex((m) => m.member_id === memberId) + 1 || null);
         }
         if (sess && !cancelled) setSessionName(sess.session_name);
-        // Cloud-first, matching the Branch Portal / Admin Panel / Member
-        // App, which all read this member's history from the cloud API.
-        // Local SQLite is only a fallback for offline viewing.
+        // Prefer local ticks (rich, zero network), then fall back to the
+        // cloud API's zone-tagged ticks for sessions synced from elsewhere.
         let ticks = localTicks;
-        const remoteTicks = await sessionsApi.athleteTicks(sessionId, memberId).catch(() => null);
-        if (remoteTicks?.ticks?.length) {
-          ticks = remoteTicks.ticks;
+        if (ticks.length === 0) {
+          const remoteTicks = await sessionsApi.athleteTicks(sessionId, memberId).catch(() => null);
+          if (remoteTicks?.ticks?.length) {
+            ticks = remoteTicks.ticks;
+          }
         }
-        if (!cancelled) setBpmPoints(ticks.map((t) => ({ value: t.bpm, ts: t.ts })));
+        if (!cancelled) setBpmPoints(ticks.map((t) => ({ value: t.bpm })));
       }
       setLoading(false);
     })();
@@ -109,7 +110,7 @@ export function AthleteDetailScreen() {
     if (!showZoneColors || !member?.ageYears) return bpmPoints;
     const mhr = computeMhr(member.ageYears, member.sex === 'female' ? 'female' : 'male');
     if (!mhr || mhr <= 0) return bpmPoints;
-    return bpmPoints.map((p) => ({ value: p.value, zone: computeZoneFromHr(p.value, mhr).zone, ts: p.ts }));
+    return bpmPoints.map((p) => ({ value: p.value, zone: computeZoneFromHr(p.value, mhr).zone }));
   }, [bpmPoints, showZoneColors, member?.ageYears, member?.sex]);
 
   // Aggregate zone distribution across ALL of this member's sessions

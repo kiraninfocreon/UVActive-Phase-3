@@ -16,6 +16,7 @@ import React from 'react';
 import type { ViewStyle } from 'react-native';
 import { SafeAreaView, type Edge } from 'react-native-safe-area-context';
 import { colors } from '../theme/tokens';
+import { AmbientBackground } from './uv/AmbientBackground';
 
 interface Props {
   children: React.ReactNode;
@@ -23,11 +24,14 @@ interface Props {
   style?: ViewStyle;
   /** Background colour — defaults to the app's standard dark background. */
   backgroundColor?: string;
+  /** Lovable ambient aura behind the content. On by default; the live grid turns it off for flat OLED black. */
+  ambient?: boolean;
 }
 
-export function Screen({ children, edges = ['top', 'bottom'], style, backgroundColor = colors.background }: Props) {
+export function Screen({ children, edges = ['top', 'bottom'], style, backgroundColor = colors.background, ambient = true }: Props) {
   return (
     <SafeAreaView edges={edges} style={[{ flex: 1, backgroundColor }, style]}>
+      {ambient ? <AmbientBackground /> : null}
       {children}
     </SafeAreaView>
   );

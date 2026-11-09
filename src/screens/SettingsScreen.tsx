@@ -1,12 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
-import { Eye, EyeOff, LogOut, KeyRound, User, Bluetooth, Building2, Mail, Info, CloudUpload, Pencil, X, Check, RefreshCw, Clock, AlertTriangle } from 'lucide-react-native';
+import { Eye, EyeOff, LogOut, KeyRound, User, Bluetooth, Building2, Mail, Info, CloudUpload, Pencil, X, Check } from 'lucide-react-native';
 import Constants from 'expo-constants';
 import { colors, fonts, radius, spacing } from '../theme/tokens';
 import { useAuth } from '../hooks/useAuth';
 import { api, ApiError, changePassword } from '../services/api';
 import { getBLEAdapterState } from '../services/ble';
-import { addSyncListener, getSyncState, syncNow, getRecalculatingSessionIds } from '../services/syncQueue';
+import { addSyncListener, getSyncState, syncNow } from '../services/syncQueue';
 import { Screen } from '../components/Screen';
 
 export function SettingsScreen() {
@@ -131,20 +131,12 @@ function ProfileCard({ name: initialName, email, gymName, role }: { name: string
 }
 
 // ── Sync to cloud — sessions auto-push after each session ends; this ──
-// gives the trainer visibility into last-sync time, pending queue depth,
-// recalculation status, plus a manual trigger.
+// gives the trainer visibility into last-sync time plus a manual trigger.
 function SyncCard() {
   const [state, setState] = useState(getSyncState());
   const [syncing, setSyncing] = useState(false);
-  const [recalcIds, setRecalcIds] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
-    const unsub = addSyncListener((s) => {
-      setState(s);
-      setRecalcIds(getRecalculatingSessionIds());
-    });
-    return unsub;
-  }, []);
+  React.useEffect(() => addSyncListener((s) => setState(s)), []);
 
   const trigger = async () => {
     setSyncing(true);
@@ -153,7 +145,6 @@ function SyncCard() {
       if (!result.ok) Alert.alert('Could not sync', result.message);
     } finally {
       setSyncing(false);
-      setRecalcIds(getRecalculatingSessionIds());
     }
   };
 
@@ -161,94 +152,22 @@ function SyncCard() {
     ? new Date(state.lastSyncedAtMs).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
     : 'Never';
 
-  const isBusy = syncing || state.flushing || state.recalculating;
-  const pendingCount = state.queueDepth;
-  const hasRecalculating = recalcIds.size > 0;
-
-  // Determine button text based on current state
-  let buttonLabel = 'Sync Now';
-  if (state.recalculating) {
-    buttonLabel = 'Recalculating…';
-  } else if (state.flushing) {
-    buttonLabel = 'Syncing…';
-  } else if (syncing) {
-    buttonLabel = 'Syncing…';
-  }
-
-  // Show the button only when there's something to sync: pending items,
-  // an error to retry, or recalculation in progress. If everything is
-  // cleanly synced, the card just shows the last-sync timestamp and
-  // a "Synced" badge — no button to distract the trainer.
-  const hasWork = pendingCount > 0 || !!state.lastError || hasRecalculating;
-  const fullySynced = !hasWork && state.lastSyncedAtMs !== null;
-
   return (
     <View style={styles.card}>
       <View style={styles.cardHeader}>
         <CloudUpload size={16} color={colors.primary} />
         <Text style={styles.cardTitle}>Sync to Cloud</Text>
-        {fullySynced && (
-          <View style={styles.syncedBadge}>
-            <Check size={12} color={colors.success} />
-            <Text style={styles.syncedBadgeText}>Synced</Text>
-          </View>
-        )}
       </View>
-
-      {/* Last sync time */}
       <View style={styles.diagRow}>
         <Text style={styles.diagLabel}>Last sync</Text>
-        <Text style={[styles.diagValue, fullySynced && styles.diagOk]}>{lastSyncLabel}</Text>
+        <Text style={styles.diagValue}>{lastSyncLabel}</Text>
       </View>
-
-      {/* Pending queue depth */}
-      {pendingCount > 0 && (
-        <View style={styles.syncStatusRow}>
-          <Clock size={12} color={colors.warning} />
-          <Text style={styles.syncStatusText}>
-            {pendingCount} pending item{pendingCount === 1 ? '' : 's'}
-          </Text>
-        </View>
-      )}
-
-      {/* Recalculating status */}
-      {hasRecalculating && (
-        <View style={styles.syncStatusRow}>
-          <RefreshCw size={12} color={colors.primary} />
-          <Text style={[styles.syncStatusText, { color: colors.primary }]}>Recalculating session summaries…</Text>
-        </View>
-      )}
-
-      {/* Error */}
-      {state.lastError ? (
-        <View style={styles.syncStatusRow}>
-          <AlertTriangle size={12} color={colors.destructive} />
-          <Text style={[styles.syncStatusText, { color: colors.destructive }]}>{state.lastError}</Text>
-        </View>
-      ) : null}
-
-      {/* Sync button — only shown when there's work to do */}
-      {hasWork && (
-        <TouchableOpacity
-          style={[styles.saveButton, isBusy && styles.saveButtonBusy]}
-          onPress={trigger}
-          disabled={isBusy}
-        >
-          {isBusy ? (
-            <View style={styles.syncButtonInner}>
-              <ActivityIndicator color={colors.primaryForeground} size="small" />
-              <Text style={styles.saveButtonText}>{buttonLabel}</Text>
-            </View>
-          ) : (
-            <Text style={styles.saveButtonText}>{buttonLabel}</Text>
-          )}
-        </TouchableOpacity>
-      )}
-
+      {state.lastError ? <Text style={styles.errorText}>{state.lastError}</Text> : null}
+      <TouchableOpacity style={styles.saveButton} onPress={trigger} disabled={syncing || state.flushing}>
+        {syncing || state.flushing ? <ActivityIndicator color={colors.primaryForeground} /> : <Text style={styles.saveButtonText}>Sync Now</Text>}
+      </TouchableOpacity>
       <Text style={styles.note}>
-        {pendingCount > 0
-          ? `${pendingCount} item${pendingCount === 1 ? '' : 's'} waiting to sync. Tap above to recalculate and push now.`
-          : 'Sessions push to the cloud automatically when they end — use this to force a sync now (e.g. after being offline).'}
+        Sessions push to the cloud automatically when they end — use this to force a sync now (e.g. after being offline).
       </Text>
     </View>
   );
@@ -428,12 +347,6 @@ const styles = StyleSheet.create({
   errorText: { color: colors.destructive, fontFamily: fonts.body, fontSize: 11, marginTop: 4 },
   saveButton: { backgroundColor: colors.primary, borderRadius: radius.sm, paddingVertical: spacing.sm, alignItems: 'center', marginTop: spacing.md },
   saveButtonDisabled: { opacity: 0.5 },
-  saveButtonBusy: { opacity: 0.7 },
-  syncButtonInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  syncStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: spacing.sm },
-  syncStatusText: { fontFamily: fonts.body, fontSize: 12, color: colors.warning },
-  syncedBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.success + '18', borderRadius: radius.full, paddingHorizontal: 8, paddingVertical: 3 },
-  syncedBadgeText: { fontFamily: fonts.bodySemiBold, fontSize: 10, color: colors.success },
   saveButtonText: { fontFamily: fonts.bodySemiBold, color: colors.primaryForeground, fontSize: 14 },
   diagRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   diagLabel: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground },

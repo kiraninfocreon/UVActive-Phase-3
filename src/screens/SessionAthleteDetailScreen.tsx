@@ -94,20 +94,18 @@ export function SessionAthleteDetailScreen() {
     const lm = (membersLocal as unknown as LocalMemberRow[]).find((m) => m.member_id === memberId) ?? null;
     setLocalMember(lm);
 
-    // Ticks: cloud-first — this history view must agree with the Branch
-    // Portal / Admin Panel / Member App, which all read the cloud API's
-    // zone-tagged ticks. Local SQLite is only a fallback for viewing
-    // offline, or right after ending a session before this device's own
-    // sync has gone through yet.
-    const remoteTicks = await sessionsApi.athleteTicks(sessionId, memberId).catch(() => null);
-    if (remoteTicks?.ticks?.length) {
-      setTicks(remoteTicks.ticks);
-      setTicksSource('remote');
+    // Ticks: prefer local SQLite (this device ran the session — richest,
+    // zero network), then fall back to the cloud API's zone-tagged ticks
+    // (session synced from elsewhere / a different trainer's device).
+    const localTicks = await getTicksForMember(sessionId, memberId).catch(() => []);
+    if (localTicks.length > 0) {
+      setTicks(localTicks.map((t) => ({ ts: t.ts, bpm: t.bpm })));
+      setTicksSource('local');
     } else {
-      const localTicks = await getTicksForMember(sessionId, memberId).catch(() => []);
-      if (localTicks.length > 0) {
-        setTicks(localTicks.map((t) => ({ ts: t.ts, bpm: t.bpm })));
-        setTicksSource('local');
+      const remoteTicks = await sessionsApi.athleteTicks(sessionId, memberId).catch(() => null);
+      if (remoteTicks?.ticks?.length) {
+        setTicks(remoteTicks.ticks);
+        setTicksSource('remote');
       } else {
         setTicks([]);
         setTicksSource('none');
@@ -175,7 +173,7 @@ export function SessionAthleteDetailScreen() {
       avgHr: remoteMember?.avgHr ?? localMember?.avg_hr ?? null,
       peakHr: remoteMember?.maxHr ?? localMember?.peak_hr ?? null,
       avgPctMhr: remoteMember?.avgPctMhr ?? (localSummary?.avgPctMhr as number | undefined) ?? null,
-      maxPctMhr: remoteMember?.maxPctMhr ?? (localSummary?.maxPctMhr as number | undefined) ?? null,
+      maxPctMhr: remoteMember?.maxPctMhr ?? null,
       zoneSeconds,
     };
   }, [remote, remoteMember, localMember, memberId]);
@@ -199,7 +197,7 @@ export function SessionAthleteDetailScreen() {
   }, [stats.maxPctMhr, zonedTicks]);
 
   const graphPoints: GraphPoint[] = useMemo(
-    () => zonedTicks.map((t) => ({ value: t.bpm, zone: zoneColors ? (t.zone ?? undefined) : undefined, ts: t.ts })),
+    () => zonedTicks.map((t) => ({ value: t.bpm, zone: zoneColors ? (t.zone ?? undefined) : undefined })),
     [zonedTicks, zoneColors],
   );
 
@@ -273,12 +271,12 @@ export function SessionAthleteDetailScreen() {
           <Stat label="Rank" value={stats.rank != null ? `#${stats.rank}` : '—'} highlight />
           <Stat label="UV Points" value={fmt1(stats.uvScore)} highlight />
           <Stat label="Sweat Points" value={fmt1(stats.sweatPoints)} />
-          <Stat label="Recovery Points" value={fmt1(stats.recoveryPoints, '0')} sub={stats.recoveryGrade ?? undefined} />
+          <Stat label="Recovery Points" value={fmt1(stats.recoveryPoints)} sub={stats.recoveryGrade ?? undefined} />
           <Stat label="Calories" value={stats.calories != null ? `${Math.round(stats.calories)} kcal` : '—'} />
           <Stat label="EPOC (kcal)" value={stats.epocCalories != null ? `${Math.round(stats.epocCalories)}` : '—'} />
           <Stat label="Avg BPM" value={stats.avgHr != null ? `${Math.round(stats.avgHr)}` : '—'} />
           <Stat label="Peak BPM" value={stats.peakHr != null ? `${Math.round(stats.peakHr)}` : '—'} />
-          <Stat label="Max %HR" value={maxPctMhr != null ? `${Math.round(maxPctMhr)}%` : '0%'} />
+          <Stat label="Max %HR" value={maxPctMhr != null ? `${Math.round(maxPctMhr)}%` : '—'} />
         </View>
 
         {/* Heart rate curve — zone-colour toggle + horizontally */}
@@ -330,8 +328,8 @@ function initials(name: string): string {
   return name.split(' ').map((p) => p[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
 }
 
-function fmt1(v: number | null | undefined, fallback: string = '—'): string {
-  if (v == null) return fallback;
+function fmt1(v: number | null | undefined): string {
+  if (v == null) return '—';
   return String(Math.round(v * 10) / 10);
 }
 

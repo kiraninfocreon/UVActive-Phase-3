@@ -64,6 +64,16 @@ export interface LiveTick {
    * language, and the member-facing app shows nothing different at all.
    */
   isReconnecting?: boolean;
+  /** Running net calories for THIS member's own active time — same formula as the final summary, so the live tile and the post-workout figure agree. */
+  caloriesSoFar?: number;
+  /** Lifecycle of the member within this session. `away` = sensor silent past the gap-fill cap (scoring frozen, rejoins automatically if the sensor returns); `left` = trainer marked them as having left. */
+  memberStatus?: "active" | "away" | "left";
+  /** Drives the avatar on the live tile — girl avatar for female, boy avatar otherwise. No photos. */
+  sex?: Sex;
+  /** Seconds this member has actually been scored for this session (their own window, not the session clock). */
+  activeSeconds?: number;
+  /** Epoch ms this member entered the session; > session start for a late joiner. */
+  joinedAtMs?: number;
 }
 
 /** Continuous per-session accumulator carried tick-to-tick. Persist this to SQLite every tick so a crash never loses progress (spec §4/§5). */
@@ -84,8 +94,6 @@ export interface SessionAccumulatorState {
   hrSum: number;
   hrCount: number;
   peakHr: number;
-  /** Highest %MHR observed so far THIS session (distinct from allTimeBestPctMhr, which is across all sessions). Drives Max %HR on the post-workout summary. */
-  maxPctMhr: number;
 
   currentZone: Zone;
   /** Seconds spent continuously in currentZone (for zone-5-sustained alerting and timeInCurrentZone). */
@@ -121,6 +129,15 @@ export interface SessionAccumulatorState {
   intervalConsistencies: number[]; // % per completed interval
 
   lastTickTs: number;
+
+  /**
+   * Seconds actually scored for this member this session (measured +
+   * bounded gap-fill ticks). This — NOT the session clock — is the
+   * duration calories/EPOC are scaled to, so a late joiner or an early
+   * leaver is never credited for time they weren't there. Optional so
+   * accumulator rows persisted by an older build still rehydrate.
+   */
+  activeSeconds?: number;
 }
 
 export type RecoveryGrade = "Elite" | "Excellent" | "Good" | "Average" | "Building" | "Needs work";
@@ -139,7 +156,6 @@ export interface FinalSessionSummary {
   avgHr: number;
   peakHr: number;
   avgPctMhr: number;
-  maxPctMhr: number;
   zoneSeconds: [number, number, number, number, number, number];
   zoneMinutes: [number, number, number, number, number, number];
   intervalRecoveries60: number[];
@@ -148,6 +164,14 @@ export interface FinalSessionSummary {
   proposedMhr: number | null; // set if peakHr > storedMhr this session — needs member confirmation
   /** Ops/QA field only — total seconds of this member's session that were gap-filled rather than measured. Never rendered on the member summary, trainer leaderboard, or any export; exists purely so an operator can audit "was this score mostly real data" if a member disputes a result. */
   totalInterpolatedSeconds: number;
+  /** Seconds this member was actually scored for — their own participation window. Sent to the cloud so recalculation uses the same figure. */
+  activeSeconds?: number;
+  /** Epoch ms the member entered the session (== session start unless a late joiner). */
+  joinedAtMs?: number;
+  /** Epoch ms the member left / went silent for good. Null/undefined when they were there until the end. */
+  leftAtMs?: number | null;
+  /** Readings dropped by the live glitch guard (impossible values / isolated spikes). Ops/QA only. */
+  rejectedReadings?: number;
 }
 
 export interface AlertEvent {

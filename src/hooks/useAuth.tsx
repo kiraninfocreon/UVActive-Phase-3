@@ -1,6 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { staffLogin, staffLogout, tokenStore, setUnauthorizedHandler, type StaffProfile, type StaffLoginResult } from '../services/api';
-import { registerForPushNotifications, unregisterPushNotifications } from '../services/pushNotifications';
 
 interface AuthContextValue {
   staff: StaffProfile | null;
@@ -24,15 +23,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUnauthorizedHandler(() => setStaff(null));
   }, []);
 
-  // Registers this device's push token on every successful sign-in
-  // AND on every app boot that restores an existing session — Expo
-  // tokens can rotate, so re-registering each time the trainer is
-  // known-authenticated keeps the backend's copy current rather than
-  // only ever capturing it once at first-ever login.
-  useEffect(() => {
-    if (staff) registerForPushNotifications();
-  }, [staff?.id]);
-
   const login = useCallback(async (email: string, password: string) => {
     const result = await staffLogin(email, password);
     if (result.staff) setStaff(result.staff);
@@ -40,7 +30,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await unregisterPushNotifications();
     await staffLogout();
     setStaff(null);
   }, []);

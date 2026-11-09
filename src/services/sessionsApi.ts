@@ -122,20 +122,6 @@ export const sessionsApi = {
   end: (sessionId: string, results: EndSessionResult[]) => api.post(`/trainer/sessions/${sessionId}/end`, { results }),
 
   cancel: (sessionId: string, reason: string) => api.post(`/trainer/sessions/${sessionId}/cancel`, { reason }),
-
-  /**
-   * Server-side recompute of Sweat/Recovery/EPOC/Max %HR/rank from the
-   * session's stored SensorReading log — the authoritative counterpart
-   * to syncQueue.ts's on-device recalculateSessionSummaries(). The
-   * on-device recalc only helps while the app still holds the local
-   * accumulator state for that session (cleared after the session
-   * screen is left / app restarts); this endpoint works for ANY past
-   * session because it recomputes straight from the ticks already
-   * synced to Postgres, so it's what actually fixes a session whose
-   * results synced null/zero a while ago. Also the "Recalculate"
-   * action on a session's history/summary screen.
-   */
-  recalculateSession: (sessionId: string) => api.post(`/trainer/sessions/${sessionId}/recalculate`),
 };
 
 export interface EndSessionResult {
@@ -158,7 +144,11 @@ export interface EndSessionResult {
   avgPctMhr?: number;
   maxPctMhr?: number;
   finalRank?: number;
-  consistencyPct?: number;
+  // Participation window — a late joiner / early leaver is scored over
+  // THEIR own active time (the cloud stores it and recalculation uses it).
+  activeSeconds?: number;
+  joinedAt?: string; // ISO
+  leftAt?: string;   // ISO — omitted when the member was there until the end
 }
 
 /** Maps the formula engine's summary shape onto what the cloud API's EndSessionDto expects. */
@@ -180,14 +170,10 @@ export function toEndSessionResult(summary: FinalSessionSummary): EndSessionResu
     epocCalories: summary.epocCalories,
     epocHours: summary.epocDurationHours,
     avgPctMhr: summary.avgPctMhr,
-    // Was never actually assigned despite the field existing on this
-    // DTO and being accepted by the cloud API — Max %HR silently sat
-    // null on every session run through this app, showing "—" on the
-    // Admin Panel / Branch Portal / Member App / this app's own
-    // drill-down no matter how hard a member trained.
-    maxPctMhr: summary.maxPctMhr,
     finalRank: summary.finalRank ?? undefined,
-    consistencyPct: summary.consistencyPct ?? undefined,
+    activeSeconds: summary.activeSeconds,
+    joinedAt: summary.joinedAtMs ? new Date(summary.joinedAtMs).toISOString() : undefined,
+    leftAt: summary.leftAtMs ? new Date(summary.leftAtMs).toISOString() : undefined,
   };
 }
 

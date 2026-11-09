@@ -1,67 +1,82 @@
 // ── UV Active design tokens ──────────────────────────────────────────
-// Ported 1:1 from the web portals' index.css HSL custom
-// properties, converted to hex for React Native (no CSS variables on
-// native). Keep these in sync if the web product's palette changes —
-// this is the same "shark"/"cerise" system already used in the Admin
-// Panel and Branch Portal, so the whole product family matches.
+// Ported 1:1 from the Lovable reference design (src/index.css, the
+// `.dark` OLED theme): near-black base, ONE coral accent, a mint
+// "recovery" counterpart, glass surfaces instead of bordered boxes,
+// Space Grotesk for text and JetBrains Mono for every number.
+// HSL values from the Lovable CSS are converted to hex here because
+// React Native has no CSS variables. The trainer AND member apps share
+// this file's values so the whole product reads as one system.
 
 export const colors = {
-  background: "#161312",
-  foreground: "#E8E6E3",
-  card: "#211D1C",
-  cardForeground: "#E8E6E3",
+  background: '#09090B', // hsl(240 12% 4%)
+  foreground: '#EEEEF1', // hsl(240 8% 94%)
+  card: '#101014', //       hsl(240 10% 7%)
+  cardForeground: '#EEEEF1',
 
-  primary: "#E74A23", // "cerise"
-  primaryForeground: "#FFFFFF",
-  primaryLight: "#EB6847",
+  primary: '#FB5061', //    hsl(354 96% 65%)  — UVActive coral
+  primaryForeground: '#FFFFFF',
+  primaryLight: '#FD8793', // hsl(354 96% 76%)
 
-  secondary: "#2B2826",
-  secondaryForeground: "#B9B2AC",
+  recovery: '#66D6C0', //   hsl(168 58% 62%)  — cool counterpart accent
+  recoveryForeground: '#09090B',
 
-  muted: "#302D2C",
-  mutedForeground: "#867C79",
+  secondary: '#1C1C21',
+  secondaryForeground: '#B2B2BD',
 
-  destructive: "#DC2828",
-  destructiveForeground: "#FFFFFF",
+  muted: '#1A1A1F',
+  mutedForeground: '#7E7E8B', // hsl(240 5% 52%)
 
-  border: "#2B2826",
-  input: "#2B2826",
-  ring: "#E74A23",
+  destructive: '#E04B52',
+  destructiveForeground: '#FFFFFF',
 
-  shark: "#161312",
-  sharkLight: "#272221",
+  border: '#1E1E24',
+  input: '#1E1E24',
+  ring: '#FB5061',
 
-  // Zone colours — shared across the whole product (Formula Engine,
-  // Admin Panel session leaderboard, Branch Portal). Never redefine
-  // these locally; import from here or from the formula engine's
-  // ZONE_COLOURS, which are the same values.
+  shark: '#09090B',
+  sharkLight: '#16161B',
+
+  // Glass system — translucent white over the OLED base (Lovable
+  // `--glass-a` family). Use these instead of solid card fills.
+  glass: 'rgba(255,255,255,0.045)',
+  glassStrong: 'rgba(255,255,255,0.075)',
+  glassSoft: 'rgba(255,255,255,0.028)',
+  glassBorder: 'rgba(255,255,255,0.07)',
+  track: 'rgba(255,255,255,0.08)',
+
+  // Heart-rate zone scale shared across the whole product (Formula
+  // Engine, Admin Panel session leaderboard, Branch Portal, Lovable TV
+  // dashboard). Never redefine these locally.
   zone: {
-    0: "#39FF14", // Standby
-    1: "#669FFF", // Recovery
-    2: "#4263CF", // Aerobic
-    3: "#1E2C7C", // Fitness
-    4: "#FF5E73", // Burn
-    5: "#FF0000", // Peak
+    0: '#39FF14', // Standby
+    1: '#669FFF', // Recovery
+    2: '#4263CF', // Aerobic
+    3: '#1E2C7C', // Fitness
+    4: '#FF5E73', // Burn
+    5: '#FF0000', // Peak
   },
 
-  success: "#22C55E",
-  warning: "#F59E0B",
-  info: "#3B82F6",
+  success: '#4ADE80',
+  warning: '#F5B13D',
+  info: '#6EA8FF',
 };
 
 export const fonts = {
-  heading: "SpaceGrotesk_700Bold",
-  headingMedium: "SpaceGrotesk_500Medium",
-  body: "Inter_400Regular",
-  bodyMedium: "Inter_500Medium",
-  bodySemiBold: "Inter_600SemiBold",
+  heading: 'SpaceGrotesk_700Bold',
+  headingMedium: 'SpaceGrotesk_500Medium',
+  body: 'SpaceGrotesk_400Regular',
+  bodyMedium: 'SpaceGrotesk_500Medium',
+  bodySemiBold: 'SpaceGrotesk_600SemiBold',
+  // Every numeral is technical — Lovable's `.metric` utility.
+  metric: 'JetBrainsMono_500Medium',
+  metricBold: 'JetBrainsMono_700Bold',
 };
 
 export const radius = {
-  sm: 6,
-  md: 10,
-  lg: 14,
-  xl: 20,
+  sm: 8,
+  md: 14,
+  lg: 20,
+  xl: 28, // Lovable card radius (1.75rem)
   full: 999,
 };
 
@@ -76,10 +91,35 @@ export const spacing = {
 
 export const shadow = {
   card: {
-    shadowColor: "#000000",
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 12,
     elevation: 4,
+  },
+  glowPrimary: {
+    shadowColor: '#FB5061',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.55,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+};
+
+/** Lovable `.section-title` / `.metric-label` text treatments. */
+export const type = {
+  sectionTitle: {
+    fontFamily: fonts.bodySemiBold,
+    fontSize: 11,
+    letterSpacing: 2,
+    textTransform: 'uppercase' as const,
+    color: colors.mutedForeground,
+  },
+  metricLabel: {
+    fontFamily: fonts.body,
+    fontSize: 10,
+    letterSpacing: 1.6,
+    textTransform: 'uppercase' as const,
+    color: colors.mutedForeground,
   },
 };

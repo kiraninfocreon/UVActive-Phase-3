@@ -78,19 +78,11 @@ function ErrorFallback({ error, onRetry, label }: { error: Error; onRetry: () =>
         <Text style={styles.buttonText}>Try Again</Text>
       </TouchableOpacity>
 
-      {__DEV__ ? (
+      {__DEV__ && (
         <ScrollView style={styles.debugBox}>
           <Text style={styles.debugText}>{error.message}</Text>
           <Text style={styles.debugStack}>{error.stack}</Text>
         </ScrollView>
-      ) : (
-        // No crash-reporting service (Sentry etc.) is wired up yet, so a
-        // production crash otherwise leaves zero trace to debug from —
-        // showing the bare message (not the stack) here is the only way
-        // to get a real error string back from the field right now.
-        <View style={styles.debugBox}>
-          <Text style={styles.debugText} numberOfLines={4}>{error.message || 'No error message available.'}</Text>
-        </View>
       )}
     </View>
   );

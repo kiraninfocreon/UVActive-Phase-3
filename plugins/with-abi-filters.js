@@ -1,20 +1,40 @@
 /**
- * UV Active — Gradle config plugin  (v5 — definitive CMake fix)
+ * UV Active — Gradle config plugin  (v4 — definitive CMake fix)
  *
  * Fixes "ninja: build.ninja still dirty after 100 tries" on Windows.
  *
  * ROOT CAUSE:
- *   Multiple native modules (react-native-screens, expo-modules-core, expo-sqlite)
- *   build C++ via CMake. The .cxx build artifacts are written inside
- *   node_modules/<lib>/android/.cxx/... On Windows, the combined path exceeds
- *   260 chars (MAX_PATH). Ninja can't write its lock file, sees build.ninja
- *   as permanently dirty, loops 100x.
+ *   react-native-screens builds C++ via CMake. The .cxx build artifacts are
+ *   written inside node_modules/react-native-screens/android/.cxx/...
+ *   On Windows, the combined path exceeds 260 chars (MAX_PATH). Ninja can't
+ *   write its lock file, sees build.ninja as permanently dirty, loops 100x.
  *
  * THE FIX:
- *   Inject `buildStagingDirectory "C:/cxx/<lib>"` into the OUTER
- *   android { externalNativeBuild { cmake { ... } } } block of each module's
- *   build.gradle. This block uses CmakeOptions DSL which DOES support
- *   buildStagingDirectory.
+ *   Inject `buildStagingDirectory "C:/cxx/rnscreens"` into the OUTER
+ *   android { externalNativeBuild { cmake { ... } } } block of
+ *   react-native-screens/android/build.gradle.
+ *
+ *   This block uses CmakeOptions DSL which DOES support buildStagingDirectory.
+ *   The INNER defaultConfig { externalNativeBuild { cmake { arguments... } } }
+ *   block uses ExternalNativeCmakeOptions DSL which does NOT — injecting there
+ *   causes "Could not get unknown property 'buildStagingDirectory'" (v3 bug).
+ *
+ * STRUCTURE of react-native-screens/android/build.gradle:
+ *
+ *   android {
+ *     defaultConfig {
+ *       externalNativeBuild {
+ *         cmake {
+ *           arguments "-DANDROID_STL=c++_shared", ...   ← ExternalNativeCmakeOptions
+ *         }                                               (NO buildStagingDirectory here)
+ *       }
+ *     }
+ *     externalNativeBuild {          ← THIS is where we inject
+ *       cmake {
+ *         path "CMakeLists.txt"      ← CmakeOptions DSL
+ *       }                             (buildStagingDirectory IS valid here)
+ *     }
+ *   }
  */
 
 const { withAppBuildGradle, withGradleProperties, withDangerousMod } = require('@expo/config-plugins');
@@ -54,55 +74,51 @@ const withGradleAbiFilters = (config) => {
   });
 };
 
-// ── 3. Patch native module build.gradle files with buildStagingDirectory ───
+// ── 3. Patch react-native-screens/android/build.gradle ───────────────────────
 // Injects buildStagingDirectory into the OUTER android { externalNativeBuild
 // { cmake { path "CMakeLists.txt" } } } block — CmakeOptions DSL.
 // NOT into defaultConfig { externalNativeBuild { cmake { arguments } } }
 // which is ExternalNativeCmakeOptions (no buildStagingDirectory property).
-const CMAKE_PATCHES = [
-  { module: 'react-native-screens', dirName: 'rnscreens' },
-  { module: 'expo-modules-core',  dirName: 'expo-modules-core' },
-  { module: 'expo-sqlite',        dirName: 'expo-sqlite' },
-];
-
-const withCMakeStagingFix = (config) => {
+const withRNScreensCMakeFix = (config) => {
   return withDangerousMod(config, [
     'android',
     async (mod) => {
-      for (const { module, dirName } of CMAKE_PATCHES) {
-        const buildGradle = path.join(
-          mod.modRequest.projectRoot,
-          'node_modules', module, 'android', 'build.gradle'
-        );
+      const buildGradle = path.join(
+        mod.modRequest.projectRoot,
+        'node_modules', 'react-native-screens', 'android', 'build.gradle'
+      );
 
-        if (!fs.existsSync(buildGradle)) {
-          console.warn(`[cmake-fix] ${module} build.gradle not found — skipping`);
-          continue;
-        }
-
-        let content = fs.readFileSync(buildGradle, 'utf8');
-
-        const marker = `C:/cxx/${dirName}`;
-        if (content.includes(marker)) {
-          console.log(`[cmake-fix] ${module} already patched`);
-          continue;
-        }
-
-        // Match the OUTER externalNativeBuild { cmake { path "CMakeLists.txt" } }
-        const pathLineRe = /([ \t]*path\s+"CMakeLists\.txt")/;
-        if (!pathLineRe.test(content)) {
-          console.warn(`[cmake-fix] Could not find \`path "CMakeLists.txt"\` in ${module} — skipping`);
-          continue;
-        }
-
-        const patched = content.replace(
-          pathLineRe,
-          `$1\n            buildStagingDirectory "${marker}"`
-        );
-
-        fs.writeFileSync(buildGradle, patched, 'utf8');
-        console.log(`[cmake-fix] ✓ buildStagingDirectory "${marker}" injected into ${module}`);
+      if (!fs.existsSync(buildGradle)) {
+        console.warn('[cmake-fix] react-native-screens build.gradle not found — skipping');
+        return mod;
       }
+
+      let content = fs.readFileSync(buildGradle, 'utf8');
+
+      if (content.includes('C:/cxx/rnscreens')) {
+        console.log('[cmake-fix] already patched');
+        return mod;
+      }
+
+      // Match the OUTER externalNativeBuild { cmake { path "CMakeLists.txt" } }
+      // This block sits directly inside android { }, NOT inside defaultConfig { }.
+      // We identify it by the presence of `path "CMakeLists.txt"` (no `arguments`).
+      //
+      // Strategy: find `path "CMakeLists.txt"` and insert buildStagingDirectory
+      // on the next line after it.
+      const pathLineRe = /([ \t]*path\s+"CMakeLists\.txt")/;
+      if (!pathLineRe.test(content)) {
+        console.warn('[cmake-fix] Could not find `path "CMakeLists.txt"` — skipping');
+        return mod;
+      }
+
+      const patched = content.replace(
+        pathLineRe,
+        '$1\n            buildStagingDirectory "C:/cxx/rnscreens"'
+      );
+
+      fs.writeFileSync(buildGradle, patched, 'utf8');
+      console.log('[cmake-fix] ✓ buildStagingDirectory "C:/cxx/rnscreens" injected into outer cmake block');
       return mod;
     },
   ]);
@@ -111,6 +127,6 @@ const withCMakeStagingFix = (config) => {
 module.exports = (config) => {
   config = withAbiFilters(config);
   config = withGradleAbiFilters(config);
-  config = withCMakeStagingFix(config);
+  config = withRNScreensCMakeFix(config);
   return config;
 };

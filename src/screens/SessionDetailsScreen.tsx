@@ -11,7 +11,7 @@ import { useAuth } from '../hooks/useAuth';
 import { sessionsApi, type RemoteSession } from '../services/sessionsApi';
 import { ApiError } from '../services/api';
 import { getSession, getSessionMembers, type LocalSessionRow } from '../db/database';
-import { ZoneDistributionBar, zoneSecondsToBuckets } from '../components/ZoneDistribution';
+import { ZoneDistributionBar, ZoneTimeBreakdown, zoneSecondsToBuckets, type ZoneBucket } from '../components/ZoneDistribution';
 import { Screen } from '../components/Screen';
 
 
@@ -38,19 +38,6 @@ interface MemberResult {
   calories: number | null;
   score: number | null;
   zoneSeconds: number[] | Record<string, number> | null;
-  // Rich post-workout fields — stored locally inside summary_json
-  // (the full FinalSessionSummary blob the formula engine produced at
-  // end-of-session, same source SessionSummaryScreen.tsx reads), not
-  // as their own flat columns. Previously this screen only pulled the
-  // flat avg_hr/peak_hr/calories/uv_score columns and never looked at
-  // summary_json at all, so a trainer revisiting a past session's
-  // history here saw none of the numbers the app itself had just
-  // calculated minutes earlier — even though they were sitting right
-  // there in the local row.
-  sweatPoints: number | null;
-  recoveryPoints: number | null;
-  epocCalories: number | null;
-  maxPctMhr: number | null;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -94,10 +81,6 @@ export function SessionDetailsScreen() {
         try {
           zoneSeconds = m.zone_seconds_json ? JSON.parse(m.zone_seconds_json) : null;
         } catch { zoneSeconds = null; }
-        let rich: { sweatPoints?: number; recoveryPoints?: number; epocCalories?: number; maxPctMhr?: number } = {};
-        try {
-          rich = m.summary_json ? JSON.parse(m.summary_json) : {};
-        } catch { rich = {}; }
         return {
           memberId: m.member_id,
           memberName: m.member_name,
@@ -106,10 +89,6 @@ export function SessionDetailsScreen() {
           calories: m.calories,
           score: m.uv_score,
           zoneSeconds,
-          sweatPoints: typeof rich.sweatPoints === 'number' ? rich.sweatPoints : null,
-          recoveryPoints: typeof rich.recoveryPoints === 'number' ? rich.recoveryPoints : null,
-          epocCalories: typeof rich.epocCalories === 'number' ? rich.epocCalories : null,
-          maxPctMhr: typeof rich.maxPctMhr === 'number' ? rich.maxPctMhr : null,
         };
       }),
     );
@@ -137,16 +116,22 @@ export function SessionDetailsScreen() {
         zoneSeconds: m.zoneMinutes
           ? Object.fromEntries(Object.entries(m.zoneMinutes).map(([z, mins]) => [z, Math.round(mins * 60)]))
           : null,
-        sweatPoints: m.sweatPoints ?? null,
-        recoveryPoints: m.recoveryPoints ?? null,
-        epocCalories: m.epocCalories ?? null,
-        maxPctMhr: m.maxPctMhr ?? null,
       }));
     }
     return rows.slice().sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
   }, [results, remote]);
 
-
+  // Session-level zone distribution — sum of every member's zone-seconds,
+  // the same aggregate the Admin Panel / Branch Portal leaderboard shows
+  // ("how did the whole class train"), not just a legend.
+  const sessionZoneBuckets = useMemo<ZoneBucket[]>(() => {
+    const totals = [0, 0, 0, 0, 0, 0];
+    for (const m of leaderboard) {
+      const buckets = zoneSecondsToBuckets(m.zoneSeconds);
+      buckets.forEach((b) => { totals[b.zone] += b.seconds; });
+    }
+    return totals.map((seconds, zone) => ({ zone, seconds }));
+  }, [leaderboard]);
 
   const status = (remote?.status ?? local?.status ?? 'scheduled') as keyof typeof STATUS_LABEL;
   const isCompleted = status === 'completed';
@@ -155,7 +140,6 @@ export function SessionDetailsScreen() {
 
   const startedAt = remote?.startedAt ?? (local?.started_at ? new Date(local.started_at).toISOString() : null);
   const scheduledAt = remote?.scheduledAt ?? (local?.scheduled_at ? new Date(local.scheduled_at).toISOString() : null);
-  const scheduledEndAt = remote?.scheduledEndAt ?? (local?.scheduled_end_at ? new Date(local.scheduled_end_at).toISOString() : null);
 
   // A session can't be started before its scheduled time — the trainer
   // can start it any time AFTER that point, there's no upper bound.
@@ -175,23 +159,6 @@ export function SessionDetailsScreen() {
 
   const onResume = () => {
     navigation.navigate('LiveSession', { sessionId });
-  };
-
-  const [recalculating, setRecalculating] = useState(false);
-  const onRecalculate = async () => {
-    setRecalculating(true);
-    try {
-      await sessionsApi.recalculateSession(sessionId);
-      await load();
-      Alert.alert('Recalculated', 'Results were recomputed from the stored sensor readings.');
-    } catch (e) {
-      Alert.alert(
-        'Could not recalculate',
-        e instanceof ApiError ? e.message : 'Check your connection and try again — recalculating needs to reach the cloud.',
-      );
-    } finally {
-      setRecalculating(false);
-    }
   };
 
   const onCancel = () => {
@@ -246,10 +213,7 @@ export function SessionDetailsScreen() {
               <Text style={[styles.statusText, { color: statusColor(status) }]}>{STATUS_LABEL[status]}</Text>
             </View>
             <Text style={styles.headerMeta}>
-              {isCompleted && local?.ended_at ? `Ended ${new Date(local.ended_at).toLocaleString()}`
-                : isScheduled && scheduledAt ? `Scheduled ${new Date(scheduledAt).toLocaleString()}${scheduledEndAt ? ` – ${new Date(scheduledEndAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}` : ''}`
-                : isInProgress && startedAt ? `Started ${new Date(startedAt).toLocaleString()}`
-                : ''}
+              {isCompleted && local?.ended_at ? `Ended ${new Date(local.ended_at).toLocaleString()}` : isScheduled && scheduledAt ? `Scheduled ${new Date(scheduledAt).toLocaleString()}` : isInProgress && startedAt ? `Started ${new Date(startedAt).toLocaleString()}` : ''}
             </Text>
           </View>
         </View>
@@ -306,20 +270,7 @@ export function SessionDetailsScreen() {
         {/* Leaderboard (completed) */}
         {isCompleted && (
           <View style={styles.section}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>Leaderboard</Text>
-              <TouchableOpacity
-                style={[styles.recalcBtn, recalculating && styles.actionDisabled]}
-                onPress={onRecalculate}
-                disabled={recalculating}
-              >
-                {recalculating ? (
-                  <ActivityIndicator size="small" color={colors.primary} />
-                ) : (
-                  <Text style={styles.recalcBtnText}>Recalculate</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+            <Text style={styles.sectionTitle}>Leaderboard</Text>
             {leaderboard.length === 0 ? (
               <Text style={styles.emptyText}>No results were recorded for this session.</Text>
             ) : (
@@ -338,9 +289,6 @@ export function SessionDetailsScreen() {
                     <Text style={styles.leaderMeta}>
                       Avg {m.avgHr ?? '—'} bpm · Peak {m.peakHr ?? '—'} bpm · {m.calories ?? '—'} kcal
                     </Text>
-                    <Text style={styles.leaderMetaRich}>
-                      Sweat {Math.round((m.sweatPoints ?? 0) * 10) / 10} · Recovery {Math.round((m.recoveryPoints ?? 0) * 10) / 10} · EPOC {Math.round(m.epocCalories ?? 0)} kcal · Max {Math.round(m.maxPctMhr ?? 0)}%HR
-                    </Text>
                     <ZoneDistributionBar buckets={zoneSecondsToBuckets(m.zoneSeconds)} height={5} />
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>
@@ -351,7 +299,13 @@ export function SessionDetailsScreen() {
               ))
             )}
 
-
+            {leaderboard.length > 0 && (
+              <View style={styles.zoneBlock}>
+                <Text style={styles.zoneBlockTitle}>Zone Distribution — whole class, this session</Text>
+                <ZoneDistributionBar buckets={sessionZoneBuckets} height={14} />
+                <ZoneTimeBreakdown buckets={sessionZoneBuckets} />
+              </View>
+            )}
           </View>
         )}
 
@@ -438,12 +392,6 @@ const styles = StyleSheet.create({
   statLabel: { fontFamily: fonts.body, fontSize: 10, color: colors.mutedForeground, textTransform: 'uppercase', letterSpacing: 0.5 },
   section: { marginTop: spacing.xl },
   sectionTitle: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.foreground, marginBottom: spacing.sm },
-  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
-  recalcBtn: {
-    borderWidth: 1, borderColor: colors.border, borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm, paddingVertical: 4, minWidth: 90, alignItems: 'center',
-  },
-  recalcBtnText: { fontFamily: fonts.bodySemiBold, fontSize: 12, color: colors.primary },
   emptyText: { fontFamily: fonts.body, fontSize: 13, color: colors.mutedForeground },
   rosterGrid: { gap: spacing.sm },
   rosterGrid2: { flexDirection: 'row', flexWrap: 'wrap' },
@@ -466,10 +414,10 @@ const styles = StyleSheet.create({
   rankText: { fontFamily: fonts.bodySemiBold, fontSize: 12, color: '#fff' },
   leaderName: { fontFamily: fonts.bodySemiBold, fontSize: 14, color: colors.foreground },
   leaderMeta: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground, marginTop: 2 },
-  leaderMetaRich: { fontFamily: fonts.body, fontSize: 11, color: colors.mutedForeground, marginTop: 1, marginBottom: 2 },
   score: { fontFamily: fonts.heading, fontSize: 18, color: colors.primary },
   scoreLabel: { fontFamily: fonts.body, fontSize: 9, color: colors.mutedForeground, textTransform: 'uppercase' },
-
+  zoneBlock: { marginTop: spacing.md, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md },
+  zoneBlockTitle: { fontFamily: fonts.bodyMedium, fontSize: 12, color: colors.mutedForeground, marginBottom: spacing.sm },
   actions: { marginTop: spacing.xl, gap: spacing.sm },
   actionPrimary: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm,

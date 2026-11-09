@@ -2,21 +2,12 @@
  * UV Active Trainer App — environment config.
  *
  * There is no hub IP to discover or configure anymore — the app talks
- * to one fixed cloud API base URL, supplied ONLY via the
- * EXPO_PUBLIC_API_BASE_URL env var. No backend URL is hardcoded here
- * or in eas.json — for local dev, set it in .env (see .env.example);
- * for EAS builds, set it as an "Environment Variable" on the EAS
- * project for each build profile (dev/preview/production), since a
- * local .env is not picked up by `eas build`. Failing loudly here
- * beats silently building against the wrong (or a stale) backend.
+ * to one fixed cloud API base URL. Swap this for your actual deployed
+ * API domain (and ideally move it to an EAS build-time env var —
+ * `process.env.EXPO_PUBLIC_API_BASE_URL` — so staging/prod builds don't
+ * require a code change).
  */
-if (!process.env.EXPO_PUBLIC_API_BASE_URL) {
-  throw new Error(
-    'EXPO_PUBLIC_API_BASE_URL is not set. Set it in .env for local dev, ' +
-      'or as an EAS "Environment Variable" on this build profile — see .env.example.',
-  );
-}
-export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL;
+export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'https://uvactive-cloud-api.vercel.app/api/v1';
 
 // BLE connection concurrency — see bleScanMediator.ts for why this
 // exists at all (Android's real GATT ceiling, not an arbitrary limit).

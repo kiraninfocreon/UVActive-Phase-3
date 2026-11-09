@@ -1,12 +1,12 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Home, Users, Settings as SettingsIcon, Radio, Dumbbell } from 'lucide-react-native';
-import { colors } from '../theme/tokens';
 import { HomeScreen } from '../screens/HomeScreen';
 import { SessionsScreen } from '../screens/SessionsScreen';
 import { MembersScreen } from '../screens/MembersScreen';
 import { SensorsScreen } from '../screens/SensorsScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
+import { FloatingDock } from '../components/uv/FloatingDock';
 import { withScreenBoundary } from '../components/withScreenBoundary';
 
 // Each tab screen gets its own error boundary — see withScreenBoundary.tsx
@@ -33,13 +33,8 @@ const Tab = createBottomTabNavigator<MainTabsParamList>();
 export function MainTabs() {
   return (
     <Tab.Navigator
-      screenOptions={{
-        headerShown: false,
-        tabBarStyle: { backgroundColor: colors.card, borderTopColor: colors.border },
-        tabBarActiveTintColor: colors.primary,
-        tabBarInactiveTintColor: colors.mutedForeground,
-        tabBarLabelStyle: { fontFamily: 'Inter_500Medium', fontSize: 10 },
-      }}
+      tabBar={(props) => <FloatingDock {...props} />}
+      screenOptions={{ headerShown: false }}
     >
       <Tab.Screen name="Home" component={BoundedHome} options={{ tabBarIcon: ({ color, size }) => <Home color={color} size={size} /> }} />
       <Tab.Screen name="Sessions" component={BoundedSessions} options={{ tabBarIcon: ({ color, size }) => <Dumbbell color={color} size={size} /> }} />

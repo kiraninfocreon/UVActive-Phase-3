@@ -44,7 +44,6 @@ async function _migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       started_at        INTEGER,
       ended_at          INTEGER,
       scheduled_at      INTEGER,
-      scheduled_end_at  INTEGER,
       duration_seconds  INTEGER,
       status             TEXT NOT NULL DEFAULT 'scheduled',
       summary_json       TEXT,
@@ -111,21 +110,25 @@ async function _migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       last_attempt_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue (created_at);
-  `);    // CREATE TABLE IF NOT EXISTS is a no-op on an already-installed DB, so
-    // it does NOT retroactively add columns to tables created by an older
-    // build. Patch them in explicitly, tolerating "duplicate column" on
-    // every run after the first (SQLite has no native ADD COLUMN IF NOT
-    // EXISTS).
-    for (const col of [
-      'ALTER TABLE ticks ADD COLUMN interpolated INTEGER NOT NULL DEFAULT 0;',
-      'ALTER TABLE sessions ADD COLUMN scheduled_end_at INTEGER;',
-    ]) {
-      try {
-        await db.execAsync(col);
-      } catch (e: any) {
-        if (!/duplicate column/i.test(String(e?.message ?? e))) throw e;
-      }
+  `);
+
+  // CREATE TABLE IF NOT EXISTS is a no-op on an already-installed DB, so
+  // it does NOT retroactively add the `interpolated` column to a ticks
+  // table created by an older build. Patch it in explicitly, tolerating
+  // "duplicate column" on every run after the first (SQLite has no
+  // native ADD COLUMN IF NOT EXISTS).
+  for (const stmt of [
+    'ALTER TABLE ticks ADD COLUMN interpolated INTEGER NOT NULL DEFAULT 0;',
+    // Per-member participation window (late join / early leave).
+    'ALTER TABLE session_members ADD COLUMN joined_at INTEGER;',
+    'ALTER TABLE session_members ADD COLUMN left_at INTEGER;',
+  ]) {
+    try {
+      await db.execAsync(stmt);
+    } catch (e: any) {
+      if (!/duplicate column/i.test(String(e?.message ?? e))) throw e;
     }
+  }
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────
@@ -139,7 +142,6 @@ export interface LocalSessionRow {
   started_at: number | null;
   ended_at: number | null;
   scheduled_at: number | null;
-  scheduled_end_at: number | null;
   duration_seconds: number | null;
   status: string;
   summary_json: string | null;
@@ -150,19 +152,17 @@ export interface LocalSessionRow {
 export async function upsertSession(row: LocalSessionRow): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO sessions (session_id, section_id, session_name, trainer_id, gym_id, started_at, ended_at, scheduled_at, scheduled_end_at, duration_seconds, status, summary_json, created_at, synced)
-     VALUES ($session_id, $section_id, $session_name, $trainer_id, $gym_id, $started_at, $ended_at, $scheduled_at, $scheduled_end_at, $duration_seconds, $status, $summary_json, $created_at, $synced)
+    `INSERT INTO sessions (session_id, section_id, session_name, trainer_id, gym_id, started_at, ended_at, scheduled_at, duration_seconds, status, summary_json, created_at, synced)
+     VALUES ($session_id, $section_id, $session_name, $trainer_id, $gym_id, $started_at, $ended_at, $scheduled_at, $duration_seconds, $status, $summary_json, $created_at, $synced)
      ON CONFLICT(session_id) DO UPDATE SET
        section_id=excluded.section_id, session_name=excluded.session_name,
        started_at=excluded.started_at, ended_at=excluded.ended_at,
-       scheduled_at=excluded.scheduled_at, scheduled_end_at=excluded.scheduled_end_at,
-       duration_seconds=excluded.duration_seconds,
+       scheduled_at=excluded.scheduled_at, duration_seconds=excluded.duration_seconds,
        status=excluded.status, summary_json=excluded.summary_json, synced=excluded.synced`,
     {
       $session_id: row.session_id, $section_id: row.section_id, $session_name: row.session_name,
       $trainer_id: row.trainer_id, $gym_id: row.gym_id, $started_at: row.started_at, $ended_at: row.ended_at,
-      $scheduled_at: row.scheduled_at, $scheduled_end_at: row.scheduled_end_at,
-      $duration_seconds: row.duration_seconds, $status: row.status,
+      $scheduled_at: row.scheduled_at, $duration_seconds: row.duration_seconds, $status: row.status,
       $summary_json: row.summary_json, $created_at: row.created_at, $synced: row.synced,
     },
   );
@@ -199,6 +199,15 @@ export async function upsertSessionMember(
      VALUES (?, ?, ?, ?, 0)
      ON CONFLICT(session_id, member_id) DO UPDATE SET member_name=excluded.member_name, sensor_device_id=excluded.sensor_device_id`,
     [sessionId, memberId, memberName, sensorDeviceId],
+  );
+}
+
+/** Records when a member entered / left the live session (late join, early leave). Either bound may be null. */
+export async function setSessionMemberWindow(sessionId: string, memberId: string, window: { joinedAt?: number | null; leftAt?: number | null }): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE session_members SET joined_at = COALESCE(?, joined_at), left_at = ? WHERE session_id=? AND member_id=?`,
+    [window.joinedAt ?? null, window.leftAt ?? null, sessionId, memberId],
   );
 }
 

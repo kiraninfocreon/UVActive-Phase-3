@@ -9,6 +9,7 @@ import { membersApi, type RemoteMember } from '../services/sessionsApi';
 import { ApiError } from '../services/api';
 import { getSensorAssignments } from '../services/sensorRegistry';
 import { Screen } from '../components/Screen';
+import { Avatar } from '../components/uv/Avatar';
 
 export function MembersScreen() {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
@@ -93,9 +94,7 @@ export function MembersScreen() {
                 style={[styles.row, wide && styles.rowWide]}
                 onPress={() => navigation.navigate('AthleteDetail', { memberId: item.id })}
               >
-                <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>{item.name.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase()}</Text>
-                </View>
+                <Avatar sex={item.sex} seed={item.id} size={44} />
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.name} numberOfLines={1}>{item.name}</Text>
                   <Text style={styles.code}>{item.memberCode}</Text>
@@ -118,14 +117,14 @@ export function MembersScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.background, padding: spacing.lg },
-  heading: { fontFamily: fonts.heading, fontSize: 24, color: colors.foreground, marginBottom: spacing.md },
+  root: { flex: 1, padding: spacing.xl },
+  heading: { fontFamily: fonts.heading, fontSize: 30, letterSpacing: -0.5, color: colors.foreground, marginBottom: spacing.lg },
   searchRow: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border,
-    borderRadius: radius.md, paddingHorizontal: spacing.md, marginBottom: spacing.md,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassBorder,
+    borderRadius: radius.full, paddingHorizontal: spacing.lg, marginBottom: spacing.lg,
   },
   searchInput: { flex: 1, paddingVertical: spacing.sm, fontFamily: fonts.body, fontSize: 14, color: colors.foreground },
-  list: { paddingBottom: spacing.xl },
+  list: { paddingBottom: 130 },
   list2: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
   empty: { alignItems: 'center', paddingTop: spacing.xxl, gap: spacing.sm, paddingHorizontal: spacing.xl },
   emptyText: { fontFamily: fonts.body, color: colors.mutedForeground, textAlign: 'center' },
@@ -133,8 +132,8 @@ const styles = StyleSheet.create({
   retryButton: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: colors.primary, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, marginTop: spacing.xs },
   retryText: { fontFamily: fonts.bodySemiBold, color: colors.primaryForeground, fontSize: 13 },
   row: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.md, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border,
-    borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.sm,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassBorder,
+    borderRadius: radius.xl, padding: spacing.md, marginBottom: spacing.sm,
   },
   rowWide: { width: '48.5%' },
   avatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.muted, alignItems: 'center', justifyContent: 'center' },

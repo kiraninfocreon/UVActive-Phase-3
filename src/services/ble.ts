@@ -29,6 +29,7 @@
  *  Battery Level Char    : 00002a19-0000-1000-8000-00805f9b34fb  (read)
  */
 
+import { MIN_PLAUSIBLE_BPM, MAX_PLAUSIBLE_BPM } from '../lib/formula-engine/hrGuard';
 import { State, type Device, type Subscription } from 'react-native-ble-plx';
 import { Platform, PermissionsAndroid } from 'react-native';
 import { bleScanMediator, getSharedManager, destroySharedManager } from './bleScanMediator';
@@ -79,6 +80,15 @@ export interface PolarDeviceStatus {
   isStale:         boolean;      // connected, but no packet for STALE_HR_MS
   reconnectCount:  number;
   rssi:            number | null; // live signal strength in dBm, polled while connected; null if unknown/not yet read
+  /**
+   * Skin-contact flag from the HR Measurement packet (bits 1-2 of the
+   * flags byte). true = strap reports contact, false = strap says it is
+   * OFF the body (its HR value is meaningless — often a stale or wild
+   * number), null = this sensor doesn't report contact. The session
+   * engine ignores readings while this is false so a strap sitting on a
+   * bench can't keep feeding a departed member's tile.
+   */
+  contact:         boolean | null;
 }
 
 /**
@@ -163,7 +173,7 @@ class PolarDevice {
       deviceId, bleAddress: '', deviceName: '',
       state: 'idle', hr: 0, battery: -1,
       rrIntervals: [], error: null, lastHeardMs: 0,
-      totalReadings: 0, isStale: false, reconnectCount: 0, rssi: null,
+      totalReadings: 0, isStale: false, reconnectCount: 0, rssi: null, contact: null,
     };
   }
 
@@ -441,8 +451,16 @@ class PolarDevice {
           }
           if (!char?.value) return;
 
-          const { hr, rrMs } = _parseHRPacket(char.value);
-          if (hr > 0 && hr < 250) {
+          const { hr, rrMs, contact } = _parseHRPacket(char.value);
+          if (contact === false) {
+            // Strap reports NO skin contact: don't treat this as a fresh
+            // reading (no lastHeardMs bump) — so isStale/the watchdog
+            // see the silence — but publish the contact flag so the UI
+            // can say "strap off" instead of looking merely quiet.
+            if (this.status.contact !== false) this._emit({ contact: false });
+            return;
+          }
+          if (hr >= MIN_PLAUSIBLE_BPM && hr <= MAX_PLAUSIBLE_BPM) {
             // _emit() is the ONLY place a fresh reading is broadcast now —
             // sessionEngine.ts subscribes via addGlobalBLEListener and
             // turns this into a formula-engine tick + SQLite write + sync
@@ -451,6 +469,7 @@ class PolarDevice {
               hr, rrIntervals: rrMs, lastHeardMs: Date.now(),
               totalReadings: this.status.totalReadings + 1,
               isStale: false,
+              contact,
             });
           }
         }
@@ -900,12 +919,15 @@ async function _requestPermissions(): Promise<boolean> {
  *    bit 3 = energy expended: present if =1  (next 2 bytes = kJ UINT16)
  *    bit 4 = RR interval:     present if =1  (each RR = UINT16, 1/1024 sec resolution)
  */
-function _parseHRPacket(base64: string): { hr: number; rrMs: number[] } {
+function _parseHRPacket(base64: string): { hr: number; rrMs: number[]; contact: boolean | null } {
   try {
     const b   = _base64ToBytes(base64);
-    if (b.length < 2) return { hr: 0, rrMs: [] };
+    if (b.length < 2) return { hr: 0, rrMs: [], contact: null };
 
     const flags    = b[0];
+    // bit 2 = "sensor contact feature supported", bit 1 = "contact detected".
+    const contactSupported = (flags & 0x04) !== 0;
+    const contact: boolean | null = contactSupported ? (flags & 0x02) !== 0 : null;
     const isUint16 = (flags & 0x01) !== 0;
     const hasEnergy= (flags & 0x08) !== 0;
     const hasRR    = (flags & 0x10) !== 0;
@@ -925,8 +947,8 @@ function _parseHRPacket(base64: string): { hr: number; rrMs: number[] } {
         offset += 2;
       }
     }
-    return { hr, rrMs };
-  } catch { return { hr: 0, rrMs: [] }; }
+    return { hr, rrMs, contact };
+  } catch { return { hr: 0, rrMs: [], contact: null }; }
 }
 
 function _base64ToBytes(base64: string): Uint8Array {

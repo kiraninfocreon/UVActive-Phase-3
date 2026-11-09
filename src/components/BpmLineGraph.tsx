@@ -15,26 +15,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 
-export interface GraphPoint {
-  value: number;
-  zone?: number;
-  /**
-   * Wall-clock ms this sample was taken. Optional for back-compat, but
-   * should be passed whenever the source data can have uneven spacing —
-   * which, since the adaptive tick-storage filter (tickStorageFilter.ts),
-   * is now true of every stored/synced tick log (dense near spikes,
-   * sparse during steady state). Without `ts`, points are laid out one
-   * index per equal-width slot — correct ONLY when every sample really
-   * is the same duration apart (e.g. the Live Session screen's
-   * once-a-second published stream). With `ts` present on every point,
-   * the x-axis switches to being proportional to actual elapsed time, so
-   * a 15s-apart pair of steady-state points takes up genuinely more
-   * width than a 1s-apart pair during a spike — otherwise an adaptively-
-   * thinned session would visually compress its steady stretches and
-   * balloon its spikes, which is the opposite of what actually happened.
-   */
-  ts?: number;
-}
+export interface GraphPoint { value: number; zone?: number; }
 
 interface Props {
   points: GraphPoint[];
@@ -80,21 +61,12 @@ export function BpmLineGraph({
   }
 
   const values = points.map(p => p.value);
-  // Safe min/max — spread operator (Math.min(...values)) can stack-
-  // overflow once a session has thousands of ticks (a long class, or
-  // a multi-hour session at 1 tick/sec).
-  let dataLo = values[0];
-  let dataHi = values[0];
-  for (let i = 1; i < values.length; i++) {
-    if (values[i] < dataLo) dataLo = values[i];
-    if (values[i] > dataHi) dataHi = values[i];
-  }
-  const lo = minValue ?? dataLo;
-  const hi = maxValue ?? dataHi;
+  const lo = minValue ?? Math.min(...values);
+  const hi = maxValue ?? Math.max(...values);
   const range = Math.max(1, hi - lo);
   const avg = Math.round(values.reduce((a, b) => a + b, 0) / values.length);
-  const min = Math.round(dataLo);
-  const max = Math.round(dataHi);
+  const min = Math.round(Math.min(...values));
+  const max = Math.round(Math.max(...values));
 
   // Which zone dominated this stretch of data — drives the "current zone"
   // chip so the reader gets an at-a-glance read, not just a squiggly line.
@@ -102,16 +74,7 @@ export function BpmLineGraph({
   points.forEach(p => { if (p.zone != null) zoneCounts[p.zone] = (zoneCounts[p.zone] || 0) + 1; });
   const dominantZone = Object.entries(zoneCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
 
-  // Real elapsed-time layout only kicks in when EVERY point carries a
-  // timestamp — a mix would make the two conventions collide. `pxPerPoint`
-  // doubles as "px per second" in this mode (it was already tuned around
-  // ~1 sample/sec, so the on-screen scale barely changes for a dense,
-  // un-thinned stretch — it only stretches out on genuinely sparse ones).
-  const hasTs = points.length > 0 && points.every((p) => p.ts != null);
-  const durationSeconds = hasTs ? Math.max(1, (points[points.length - 1].ts! - points[0].ts!) / 1000) : null;
-  const contentWidth = scrollable
-    ? Math.max((hasTs ? durationSeconds! : points.length) * pxPerPoint, 320)
-    : undefined;
+  const contentWidth = scrollable ? Math.max(points.length * pxPerPoint, 320) : undefined;
 
   const plot = (
     <View style={[gs.wrap, { height }, contentWidth ? { width: contentWidth } : null]}>
@@ -132,7 +95,7 @@ export function BpmLineGraph({
         pointerEvents="none"
       />
       <View style={gs.plotArea}>
-        <GraphLines points={points} lo={lo} range={range} height={height} lineColor={lineColor} timeBased={hasTs} />
+        <GraphLines points={points} lo={lo} range={range} height={height} lineColor={lineColor} />
       </View>
     </View>
   );
@@ -177,16 +140,14 @@ function StatChip({ label, value, color }: { label: string; value: string; color
   );
 }
 
-function GraphLines({ points, lo, range, height, lineColor, timeBased }: { points: GraphPoint[]; lo: number; range: number; height: number; lineColor: string; timeBased: boolean }) {
+function GraphLines({ points, lo, range, height, lineColor }: { points: GraphPoint[]; lo: number; range: number; height: number; lineColor: string }) {
   const [width, setWidth] = React.useState(0);
 
   const n = points.length;
   const segW = width > 0 ? width / (n - 1) : 0;
-  const t0 = timeBased ? points[0].ts! : 0;
-  const tSpan = timeBased ? Math.max(1, points[n - 1].ts! - t0) : 1;
 
   const toXY = (i: number) => {
-    const x = timeBased ? ((points[i].ts! - t0) / tSpan) * width : i * segW;
+    const x = i * segW;
     const y = height - ((points[i].value - lo) / range) * (height - 12) - 6;
     return { x, y };
   };

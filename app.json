@@ -20,7 +20,9 @@
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "UV Active needs Bluetooth to connect to Polar heart rate sensors and stream live data.",
         "NSBluetoothPeripheralUsageDescription": "UV Active uses Bluetooth to read heart rate data from Polar sensors.",
-        "UIBackgroundModes": ["bluetooth-central"],
+        "UIBackgroundModes": [
+          "bluetooth-central"
+        ],
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -55,6 +57,12 @@
       "expo-font",
       "expo-secure-store",
       "expo-sqlite",
+      [
+        "expo-screen-orientation",
+        {
+          "initialOrientation": "PORTRAIT_UP"
+        }
+      ],
       "./plugins/with-abi-filters",
       "./plugins/with-foreground-service",
       [

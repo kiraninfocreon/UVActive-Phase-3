@@ -22,20 +22,20 @@
 import { addGlobalBLEListener, type PolarDeviceStatus } from './ble';
 import {
   createAccumulator, processTick, finalizeSummary, startTargetInterval, endTargetInterval,
+  guardReading, newGuardMemory, markResumed,
 } from '../lib/formula-engine';
 import type {
-  SessionAccumulatorState, LiveTick, MemberProfile, FinalSessionSummary, Zone,
+  SessionAccumulatorState, LiveTick, MemberProfile, FinalSessionSummary, Zone, GuardMemory, Sex,
 } from '../lib/formula-engine';
 import {
   insertTick, saveAccumulatorState, loadAccumulatorStates,
-  upsertSession, upsertSessionMember, saveSessionMemberSummary,
+  upsertSession, upsertSessionMember, saveSessionMemberSummary, setSessionMemberWindow,
   enqueueSync, getSession, type LocalSessionRow,
 } from '../db/database';
 import { sessionsApi, type RemoteMember } from './sessionsApi';
 import { flushAll } from './syncQueue';
 import { computeFillBpm, needsFill, WATCHDOG_TICK_MS } from './sensorWatchdog';
 import { startTelemetryReporting, stopTelemetryReporting } from './telemetryReporter';
-import { TickStorageFilter } from './tickStorageFilter';
 
 export interface SessionMemberSetup {
   memberId: string;
@@ -43,8 +43,31 @@ export interface SessionMemberSetup {
   sensorDeviceId: string; // the ble.ts targetId this athlete is assigned to
 }
 
+/**
+ * Where a member is in their own session lifecycle.
+ *   active — scoring normally (includes the first ≤2 min of a signal dropout, which is gap-filled).
+ *   away   — sensor silent past the gap-fill cap. Scoring is FROZEN (nothing more is fabricated),
+ *            and the member rejoins automatically the moment their sensor sends real data again.
+ *   left   — the trainer marked them as having left. Their sensor is released; their result is
+ *            final and stays on the board, greyed out. Assigning a sensor again rejoins them.
+ */
+export type MemberStatus = 'active' | 'away' | 'left';
+
+export interface RosterEntry extends SessionMemberSetup {
+  status: MemberStatus;
+  sex: Sex;
+  joinedAtMs: number;
+  leftAtMs: number | null;
+  /** True once at least one real reading has been scored for this member. */
+  hasData: boolean;
+}
+
 interface EngineMember extends SessionMemberSetup {
   state: SessionAccumulatorState;
+  status: MemberStatus;
+  joinedAtMs: number;
+  leftAtMs: number | null;
+  guard: GuardMemory;
 }
 
 type LiveListener = (ticks: Map<string, LiveTick>) => void;
@@ -62,11 +85,6 @@ class SessionEngine {
   private lastRealTickMs = new Map<string, number>(); // memberId -> wall-clock time of last REAL (non-interpolated) tick
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
-  // Gates which ticks actually get an insertTick() row (SQLite + cloud
-  // sync + graphs) — every real tick still runs through processTick()
-  // regardless, so scoring accuracy is untouched. See tickStorageFilter.ts.
-  private storageFilter = new TickStorageFilter();
-
   private liveTicks = new Map<string, LiveTick>();
   private liveListeners = new Set<LiveListener>();
   private rosterListeners = new Set<() => void>();
@@ -81,8 +99,28 @@ class SessionEngine {
     this._paused = true;
   }
 
+  /**
+   * Resumes scoring after a pause / break / the pre-start countdown.
+   *
+   * Two things must be reset here or a break reads as data loss:
+   *  - the watchdog's per-member "last real tick" clock — otherwise any
+   *    break longer than 15s makes the watchdog fabricate a fill tick for
+   *    EVERYONE the instant we resume (before real packets arrive);
+   *  - each accumulator's lastTickTs, so the first tick after the break is
+   *    credited exactly one second, not the break length (up to the 5s cap).
+   * The glitch guard also drops its pending reading — HR legitimately
+   * falls a lot during a rest.
+   */
   resume() {
+    const wasPaused = this._paused;
     this._paused = false;
+    if (!wasPaused) return;
+    const now = Date.now();
+    for (const m of this.members.values()) {
+      m.state = markResumed(m.state);
+      m.guard = { ...m.guard, pending: null };
+      if (this.lastRealTickMs.has(m.memberId)) this.lastRealTickMs.set(m.memberId, now);
+    }
   }
 
   get isActive() {
@@ -98,11 +136,16 @@ class SessionEngine {
    * signal" tiles for everyone BEFORE their first tick arrives (rather
    * than only showing members who already have a live reading).
    */
-  getMemberRoster(): SessionMemberSetup[] {
+  getMemberRoster(): RosterEntry[] {
     return Array.from(this.members.values()).map((m) => ({
       memberId: m.memberId,
       memberName: m.memberName,
       sensorDeviceId: m.sensorDeviceId,
+      status: m.status,
+      sex: m.state.sex,
+      joinedAtMs: m.joinedAtMs,
+      leftAtMs: m.leftAtMs,
+      hasData: m.state.hrCount > 0,
     }));
   }
 
@@ -167,7 +210,6 @@ class SessionEngine {
     sessionName: string;
     members: { member: RemoteMember; sensorDeviceId: string }[];
     scheduledAt?: string;
-    scheduledEndAt?: string;
   }): Promise<void> {
     if (this.isActive) throw new Error('A session is already active — end it before starting another.');
 
@@ -181,7 +223,6 @@ class SessionEngine {
     this.lastProcessedHeardMs.clear();
     this.lastRealTickMs.clear();
     this.liveTicks.clear();
-    this.storageFilter.clear();
 
     const sessionRow: LocalSessionRow = {
       session_id: this.sessionId,
@@ -192,7 +233,6 @@ class SessionEngine {
       started_at: this.startedAtMs,
       ended_at: null,
       scheduled_at: params.scheduledAt ? new Date(params.scheduledAt).getTime() : null,
-      scheduled_end_at: params.scheduledEndAt ? new Date(params.scheduledEndAt).getTime() : null,
       duration_seconds: null,
       status: 'in_progress',
       summary_json: null,
@@ -209,7 +249,11 @@ class SessionEngine {
     for (const { member, sensorDeviceId } of params.members) {
       const profile = toMemberProfile(member);
       const state = existingStates.get(member.id) ?? createAccumulator(profile, member.id);
-      this.members.set(member.id, { memberId: member.id, memberName: member.name, sensorDeviceId, state });
+      this.members.set(member.id, {
+        memberId: member.id, memberName: member.name, sensorDeviceId, state,
+        status: 'active', joinedAtMs: this.startedAtMs, leftAtMs: null,
+        guard: newGuardMemory({ lastBpm: state.recentBpm[state.recentBpm.length - 1] ?? null, lastTs: state.lastTickTs }),
+      });
       // A member can enter a session with NO sensor yet (a "dead block" —
       // the trainer assigns it later, live, from the session grid). Only
       // wire the BLE device map for members that actually have one.
@@ -271,6 +315,7 @@ class SessionEngine {
     const now = Date.now();
 
     for (const member of this.members.values()) {
+      if (member.status !== 'active') continue; // away/left members are frozen — never fabricate data for them
       if (!member.sensorDeviceId) continue; // dead block — nothing to watchdog yet
       const lastReal = this.lastRealTickMs.get(member.memberId) ?? 0;
       if (lastReal === 0) continue; // never had a real tick this session — stays a plain "waiting" tile, not "reconnecting"
@@ -283,25 +328,19 @@ class SessionEngine {
         if (!cappedOut) {
           const { state, liveTick } = processTick(member.state, { memberId: member.memberId, ts: now, bpm, interpolated: true }, member.memberName);
           member.state = state;
-          this.liveTicks.set(member.memberId, liveTick);
+          this.liveTicks.set(member.memberId, this.decorate(member, liveTick));
 
-          // Watchdog fills always get stored (see tickStorageFilter.ts's
-          // file header on why interpolated ticks are exempt from
-          // thinning) — this call also anchors the storage filter so the
-          // next REAL tick after reconnect is force-kept too.
-          this.storageFilter.shouldKeep(member.memberId, now, bpm, true);
           // Persisted with interpolated=1 (see database.ts) — internal
           // QA trail only, never read back into any member/trainer copy.
           insertTick(this.sessionId!, member.memberId, now, bpm, true).catch((e) => console.warn('[sessionEngine][watchdog] insertTick failed', e));
           saveAccumulatorState(this.sessionId!, member.memberId, state).catch((e) => console.warn('[sessionEngine][watchdog] saveAccumulatorState failed', e));
         } else {
-          // Past the fill cap — freeze scoring, but keep the tile
-          // showing "reconnecting" (not a dropped/blank tile) by
-          // republishing the existing liveTick with the flag set.
-          const existing = this.liveTicks.get(member.memberId);
-          if (existing && !existing.isReconnecting) {
-            this.liveTicks.set(member.memberId, { ...existing, isReconnecting: true });
-          }
+          // Past the fill cap (2 min of silence): the member has genuinely
+          // gone — sensor out of range, strap off, or they walked out.
+          // Freeze scoring and flag them AWAY instead of leaving a tile
+          // that looks live ("Reconnecting…") forever. The leave time is
+          // when their last REAL reading landed, not now.
+          this.setAway(member, lastReal);
         }
       } catch (e) {
         console.warn('[sessionEngine][watchdog] fill tick error:', e);
@@ -310,56 +349,123 @@ class SessionEngine {
     this.publish();
   }
 
+  /** Flags a member AWAY (signal lost past the fill cap) — scoring frozen, rejoin is automatic when real data returns. */
+  private setAway(member: EngineMember, leftAtMs: number) {
+    if (member.status !== 'active') return;
+    member.status = 'away';
+    member.leftAtMs = leftAtMs;
+    const existing = this.liveTicks.get(member.memberId);
+    if (existing) this.liveTicks.set(member.memberId, { ...existing, isReconnecting: false, memberStatus: 'away' });
+    if (this.sessionId) setSessionMemberWindow(this.sessionId, member.memberId, { leftAt: leftAtMs }).catch(() => {});
+    this.publishRoster();
+  }
+
+  /** Brings a member back to ACTIVE (sensor returned / re-assigned / re-added). */
+  private setActive(member: EngineMember) {
+    if (member.status === 'active') return;
+    member.status = 'active';
+    member.leftAtMs = null;
+    const existing = this.liveTicks.get(member.memberId);
+    if (existing) this.liveTicks.set(member.memberId, { ...existing, isReconnecting: false, memberStatus: 'active' });
+    if (this.sessionId) setSessionMemberWindow(this.sessionId, member.memberId, { leftAt: null }).catch(() => {});
+    this.publishRoster();
+  }
+
+  /** Adds the fields the tile needs that processTick() itself doesn't know about. */
+  private decorate(member: EngineMember, tick: LiveTick): LiveTick {
+    return { ...tick, sex: member.state.sex, joinedAtMs: member.joinedAtMs, memberStatus: member.status };
+  }
+
   /** Reassign or add a sensor mid-session — this is the ONLY sensor-assignment
    *  path there is; there's no separate "assign sensor" screen. Works both
-   *  for fixing a mis-paired sensor and for filling in a "dead block"
-   *  (a member who started the session with no sensor at all).
-   *  Returns the member who was bumped off this sensor, if any — a real
-   *  device can appear in the nearby-scan list again while it's already
-   *  assigned to someone else in this same session (still broadcasting,
-   *  trainer taps it for a different member by mistake, or re-assigns it
-   *  on purpose after member A dropped out). Before this fix,
-   *  `deviceToMember` was correctly repointed to the new member but the
-   *  bumped member's own `sensorDeviceId` field was never cleared — their
-   *  tile kept showing "connected" to a sensor that was actually now
-   *  routing ticks to someone else, silently, with no warning to the
-   *  trainer. */
-  assignSensor(memberId: string, sensorDeviceId: string): { bumpedMemberId: string; bumpedMemberName: string } | null {
+   *  for fixing a mis-paired sensor, for filling in a "dead block"
+   *  (a member who started the session with no sensor at all), and for
+   *  handing a departed member's strap to a late joiner. */
+  assignSensor(memberId: string, sensorDeviceId: string) {
     const m = this.members.get(memberId);
-    if (!m) return null;
+    if (!m) return;
 
-    let bumped: { bumpedMemberId: string; bumpedMemberName: string } | null = null;
+    // The strap may still be mapped to someone else (a member who left, or
+    // a mis-pairing being corrected). Take it from them cleanly: before
+    // this, both members kept pointing at the same device — the previous
+    // owner's tile then sat "reconnecting" on a sensor that was now
+    // feeding someone else.
     const previousOwnerId = this.deviceToMember.get(sensorDeviceId);
     if (previousOwnerId && previousOwnerId !== memberId) {
-      const previousOwner = this.members.get(previousOwnerId);
-      if (previousOwner) {
-        previousOwner.sensorDeviceId = '';
-        bumped = { bumpedMemberId: previousOwnerId, bumpedMemberName: previousOwner.memberName };
+      const prev = this.members.get(previousOwnerId);
+      if (prev) {
+        prev.sensorDeviceId = '';
+        if (prev.status === 'active' && prev.state.hrCount > 0) this.setAway(prev, this.lastRealTickMs.get(prev.memberId) ?? Date.now());
+        this.lastRealTickMs.delete(prev.memberId);
       }
     }
 
-    if (m.sensorDeviceId) this.deviceToMember.delete(m.sensorDeviceId);
+    if (m.sensorDeviceId && m.sensorDeviceId !== sensorDeviceId) this.deviceToMember.delete(m.sensorDeviceId);
     m.sensorDeviceId = sensorDeviceId;
     this.deviceToMember.set(sensorDeviceId, memberId);
-    this.storageFilter.reset(memberId); // new physical sensor — don't diff its first reading against the old one's stale bpm
+
+    // A fresh strap on a new body: forget the old baseline (it belonged to a
+    // different heart) and don't let the swap itself register as a dropout.
+    m.guard = newGuardMemory({ lastBpm: null, lastTs: 0 });
+    if (this.lastRealTickMs.has(memberId)) this.lastRealTickMs.set(memberId, Date.now());
+    this.setActive(m);
+    if (this.sessionId) upsertSessionMember(this.sessionId, memberId, m.memberName, sensorDeviceId).catch(() => {});
     this.publishRoster();
-    return bumped;
+    this.publish();
   }
 
   /**
    * Late join — a member who wasn't part of the original roster taps in
    * mid-session. They enter as a "dead block" (no sensor yet); the
    * trainer taps their tile immediately after to assign one, same as
-   * any other unassigned block.
+   * any other unassigned block. Their `joinedAtMs` is recorded so their
+   * calories/score are scaled to the time they were actually there.
    */
   async addLateMember(member: RemoteMember): Promise<void> {
     if (!this.sessionId || this.members.has(member.id)) return;
     const profile = toMemberProfile(member);
     const state = createAccumulator(profile, member.id);
-    this.members.set(member.id, { memberId: member.id, memberName: member.name, sensorDeviceId: '', state });
+    const joinedAtMs = Date.now();
+    this.members.set(member.id, {
+      memberId: member.id, memberName: member.name, sensorDeviceId: '', state,
+      status: 'active', joinedAtMs, leftAtMs: null, guard: newGuardMemory(),
+    });
     await upsertSessionMember(this.sessionId, member.id, member.name, '');
+    await setSessionMemberWindow(this.sessionId, member.id, { joinedAt: joinedAtMs, leftAt: null });
     await enqueueSync('member_enroll', this.sessionId, { memberId: member.id });
     flushAll().catch(() => {});
+    this.publishRoster();
+  }
+
+  /**
+   * Marks a member as LEFT mid-session ("Member left" on their tile).
+   * Distinct from markAbsent(): the member DID train, so their result is
+   * kept, finalized at the moment they left, and stays on the leaderboard
+   * (greyed on the live grid). Their strap is released so it can be given
+   * to a late joiner, and nothing further is ever credited to them — the
+   * previous behaviour left a departed member's tile "reconnecting" and
+   * their calories scaled to the whole session length.
+   * A member with no data at all is treated as absent instead.
+   */
+  async markLeft(memberId: string): Promise<void> {
+    if (!this.sessionId) return;
+    const m = this.members.get(memberId);
+    if (!m) return;
+    if (m.state.hrCount === 0) return this.markAbsent(memberId);
+
+    const leftAt = m.status === 'away' && m.leftAtMs ? m.leftAtMs : (this.lastRealTickMs.get(memberId) ?? Date.now());
+    if (m.sensorDeviceId) this.deviceToMember.delete(m.sensorDeviceId);
+    m.sensorDeviceId = '';
+    m.status = 'left';
+    m.leftAtMs = leftAt;
+    this.lastRealTickMs.delete(memberId);
+
+    const existing = this.liveTicks.get(memberId);
+    if (existing) this.liveTicks.set(memberId, { ...existing, isReconnecting: false, memberStatus: 'left' });
+    await upsertSessionMember(this.sessionId, memberId, m.memberName, '');
+    await setSessionMemberWindow(this.sessionId, memberId, { leftAt });
+    saveAccumulatorState(this.sessionId, memberId, m.state).catch(() => {});
+    this.publish();
     this.publishRoster();
   }
 
@@ -376,7 +482,6 @@ class SessionEngine {
     this.members.delete(memberId);
     this.liveTicks.delete(memberId);
     this.lastRealTickMs.delete(memberId);
-    this.storageFilter.reset(memberId);
     await enqueueSync('member_absent', this.sessionId, { memberId });
     flushAll().catch(() => {});
     this.publish();
@@ -398,31 +503,28 @@ class SessionEngine {
    * summary screen) can render a leaderboard immediately without
    * waiting on the network.
    */
-  async endSession(onProgress?: (current: number, total: number, memberName: string) => void): Promise<FinalSessionSummary[]> {
+  async endSession(): Promise<FinalSessionSummary[]> {
     if (!this.sessionId) throw new Error('No active session.');
     const sessionId = this.sessionId;
     const endedAtMs = Date.now();
     const durationHours = Math.max(0, (endedAtMs - this.startedAtMs) / 3_600_000);
 
-    const memberList = Array.from(this.members.values());
     const summaries: FinalSessionSummary[] = [];
-    for (let i = 0; i < memberList.length; i++) {
-      const m = memberList[i];
-      onProgress?.(i + 1, memberList.length, m.memberName);
-      // One member's corrupted accumulator state (e.g. a NaN that crept
-      // in from a bad tick) must never be able to abort finalization for
-      // the rest of the class — that would strand the whole session
-      // half-ended: some members saved, everyone else lost, no leaderboard.
-      // Skip just that member and keep going; they're logged so it's
-      // visible, not silently dropped.
-      try {
-        const summary = finalizeSummary({ state: m.state, durationHours });
-        summaries.push(summary);
-        await saveSessionMemberSummary(sessionId, m.memberId, summary);
-      } catch (e) {
-        console.warn(`[sessionEngine] finalizeSummary failed for member ${m.memberId} — skipping:`, e);
-      }
+    const neverScored: string[] = [];
+    for (const m of this.members.values()) {
+      // A member who never produced a single reading (no sensor ever
+      // assigned / strap never connected) has no data to rank. They used to
+      // get a 0-point result and be marked "attended"; record them as a
+      // no-show instead so they don't pollute the leaderboard.
+      if (m.state.hrCount === 0) { neverScored.push(m.memberId); continue; }
+      const summary = finalizeSummary({ state: m.state, durationHours });
+      summary.joinedAtMs = m.joinedAtMs;
+      summary.leftAtMs = m.status === 'active' ? null : m.leftAtMs;
+      summary.rejectedReadings = m.guard.rejected;
+      summaries.push(summary);
+      await saveSessionMemberSummary(sessionId, m.memberId, summary);
     }
+    for (const memberId of neverScored) await enqueueSync('member_absent', sessionId, { memberId });
 
     // Rank within this session, highest sweat score first — matches
     // the Admin Panel / Branch Portal leaderboard convention.
@@ -439,7 +541,6 @@ class SessionEngine {
       started_at: this.startedAtMs,
       ended_at: endedAtMs,
       scheduled_at: local?.scheduled_at ?? null,
-      scheduled_end_at: local?.scheduled_end_at ?? null,
       duration_seconds: Math.round((endedAtMs - this.startedAtMs) / 1000),
       status: 'completed',
       summary_json: JSON.stringify(summaries),
@@ -487,6 +588,7 @@ class SessionEngine {
   private handleBleStatus(deviceId: string, status: PolarDeviceStatus) {
     if (!this.sessionId || this._paused) return;
     if (status.state !== 'connected') return;
+    if (status.contact === false) return; // strap reports it is OFF the body — its HR value is meaningless
     if (!status.hr || status.hr <= 0) return;
 
     // A single bad tick must never be able to take down the BLE listener
@@ -503,27 +605,34 @@ class SessionEngine {
       if (!memberId) return; // sensor connected but not assigned to anyone yet — held, not dropped (next assignSensor() call catches future ticks)
       const member = this.members.get(memberId);
       if (!member) return;
+      if (member.status === 'left') return; // a departed member's strap must never feed their frozen result
 
       const ts = status.lastHeardMs;
+
+      // Glitch guard — see formula-engine/hrGuard.ts. An impossible value is
+      // dropped (and does NOT count as the sensor being alive, so a strap that
+      // only emits garbage still falls through to the watchdog); a suspicious
+      // jump is held one reading until the next one confirms or refutes it.
+      const guarded = guardReading(member.guard, { ts, bpm: status.hr }, member.state.mhr);
+      member.guard = guarded.memory;
+      if (guarded.verdict === 'reject') return;
       this.lastRealTickMs.set(memberId, Date.now());
+      if (guarded.verdict === 'hold') return;
+
+      // Real data after a silence → the member is back. Reset the baseline
+      // is automatic (the guard treats an old baseline as stale).
+      if (member.status === 'away') this.setActive(member);
+
       const { state, liveTick } = processTick(member.state, { memberId, ts, bpm: status.hr }, member.memberName);
       member.state = state;
-      this.liveTicks.set(memberId, liveTick);
+      this.liveTicks.set(memberId, this.decorate(member, liveTick));
       this.publish();
 
       // Write-through — both calls fire-and-forget from this synchronous
       // handler's perspective (SQLite writes are async, but nothing here
       // waits on them before the NEXT tick can be processed; expo-sqlite
       // serializes writes internally, so ordering is preserved regardless).
-      //
-      // insertTick() itself is gated by the adaptive storage filter —
-      // processTick() above already ran on EVERY real reading (scoring
-      // accuracy is unaffected), this only decides whether the raw
-      // reading is ALSO worth a row in the ticks table / cloud sync /
-      // graph log. See tickStorageFilter.ts.
-      if (this.storageFilter.shouldKeep(memberId, ts, status.hr, false)) {
-        insertTick(this.sessionId, memberId, ts, status.hr).catch((e) => console.warn('[sessionEngine] insertTick failed', e));
-      }
+      insertTick(this.sessionId, memberId, ts, status.hr).catch((e) => console.warn('[sessionEngine] insertTick failed', e));
       saveAccumulatorState(this.sessionId, memberId, state).catch((e) => console.warn('[sessionEngine] saveAccumulatorState failed', e));
     } catch (e) {
       console.warn('[sessionEngine] tick processing error:', e);

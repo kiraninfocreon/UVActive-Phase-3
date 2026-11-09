@@ -62,17 +62,6 @@ export function SessionSetupScreen() {
   const [minute, setMinute] = useState(initMinute);
   const [amPm, setAmPm] = useState<'AM' | 'PM'>(initHour < 12 ? 'AM' : 'PM');
 
-  // End time — defaults to start time + 1 hour, rounded to next 5-min mark.
-  let initEndHour = (initHour + 1) % 24;
-  let initEndMinute = Math.ceil(initMinute / 5) * 5;
-  if (initEndMinute >= 60) {
-    initEndMinute = 0;
-    initEndHour = (initEndHour + 1) % 24;
-  }
-  const [endHour, setEndHour] = useState(initEndHour % 12 === 0 ? 12 : initEndHour % 12);
-  const [endMinute, setEndMinute] = useState(initEndMinute);
-  const [endAmPm, setEndAmPm] = useState<'AM' | 'PM'>(initEndHour < 12 ? 'AM' : 'PM');
-
   const [members, setMembers] = useState<RemoteMember[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(true);
   const [search, setSearch] = useState('');
@@ -157,20 +146,9 @@ export function SessionSetupScreen() {
     return d;
   }, [dayOffset, hour, minute, amPm]);
 
-  const scheduledEndAt = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + dayOffset);
-    const endHour24 = (endHour % 12) + (endAmPm === 'PM' ? 12 : 0);
-    d.setHours(endHour24, endMinute, 0, 0);
-    return d;
-  }, [dayOffset, endHour, endMinute, endAmPm]);
-
   // Start times must be in the future — for today, a time that has
   // already passed cannot be scheduled.
   const timeInPast = scheduledAt.getTime() <= Date.now();
-
-  // End time must be strictly after start time.
-  const endBeforeStart = scheduledEndAt.getTime() <= scheduledAt.getTime();
 
   // ── Schedule save ────────────────────────────────────────────────
   const saveScheduled = async () => {
@@ -183,10 +161,6 @@ export function SessionSetupScreen() {
       Alert.alert('Start time must be in the future', 'Pick a start time that has not passed yet.');
       return;
     }
-    if (endBeforeStart) {
-      Alert.alert('End time must be after start time', 'Pick an end time that comes after the start time.');
-      return;
-    }
     setSaving(true);
     try {
       // No trainer-set capacity anymore — it's always the number of
@@ -195,7 +169,6 @@ export function SessionSetupScreen() {
         id: uuidv4(),
         name: sessionName.trim(),
         scheduledAt: scheduledAt.toISOString(),
-        scheduledEndAt: scheduledEndAt.toISOString(),
       });
       // Enroll whichever members were selected (may be none) so the
       // roster shows up immediately for anyone already picked.
@@ -240,7 +213,6 @@ export function SessionSetupScreen() {
         sessionName: sessionName.trim(),
         members: membersForEngine,
         scheduledAt: remoteSession?.scheduledAt ?? (mode === 'schedule' ? scheduledAt.toISOString() : undefined),
-        scheduledEndAt: remoteSession?.scheduledEndAt ?? (mode === 'schedule' ? scheduledEndAt.toISOString() : undefined),
       });
       sessionEngine.pause(); // CountdownOverlay on the live screen resumes it — see LiveSessionScreen
       navigation.replace('LiveSession', { sessionId: localSessionId });
@@ -313,29 +285,9 @@ export function SessionSetupScreen() {
             <Text style={styles.pastTimeNote}>Start time must be in the future — choose a later time.</Text>
           )}
 
-          <Text style={styles.label}>End time</Text>
-          <View style={[styles.timeRow, wide && styles.timeRowWide]}>
-            <Stepper label="Hour" value={endHour} min={1} max={12} onChange={setEndHour} />
-            <Stepper label="Minute" value={endMinute} min={0} max={55} step={5} onChange={setEndMinute} />
-            <View style={styles.amPmWrap}>
-              <Text style={styles.stepperLabel}>AM / PM</Text>
-              <TouchableOpacity
-                style={styles.amPmBtn}
-                onPress={() => setEndAmPm((p) => (p === 'AM' ? 'PM' : 'AM'))}
-                hitSlop={6}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.amPmText}>{endAmPm}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-          {endBeforeStart && (
-            <Text style={styles.pastTimeNote}>End time must be after the start time.</Text>
-          )}
-
           <TouchableOpacity
-            style={[styles.primaryButton, (!sessionName.trim() || saving || timeInPast || endBeforeStart) && styles.primaryButtonDisabled]}
-            disabled={!sessionName.trim() || saving || timeInPast || endBeforeStart}
+            style={[styles.primaryButton, (!sessionName.trim() || saving || timeInPast) && styles.primaryButtonDisabled]}
+            disabled={!sessionName.trim() || saving || timeInPast}
             onPress={() => setStep('members')}
           >
             <Text style={styles.primaryButtonText}>Next — Choose Members ({selected.length})</Text>

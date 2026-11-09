@@ -7,7 +7,7 @@
  * `process.env.EXPO_PUBLIC_API_BASE_URL` — so staging/prod builds don't
  * require a code change).
  */
-export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'https://uvactive-cloud-api.vercel.app/api/v1';
+export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'https://uvactivephase3-kljr4.ondigitalocean.app/api/v1';
 
 // BLE connection concurrency — see bleScanMediator.ts for why this
 // exists at all (Android's real GATT ceiling, not an arbitrary limit).
